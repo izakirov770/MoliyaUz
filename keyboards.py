@@ -1,0 +1,57 @@
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from texts import UZ
+
+def lang_kb():
+    # hozircha UZga yo'naltiramiz, lekin tugmalar ko'rinishda turadi
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🇺🇿 O‘zbek", callback_data="lang:uz")]
+    ])
+
+def phone_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=UZ["share_phone"], request_contact=True)]],
+        resize_keyboard=True, one_time_keyboard=True
+    )
+
+def currency_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=UZ["btn_uzs"], callback_data="cur:UZS")],
+        [InlineKeyboardButton(text=UZ["btn_usd"], callback_data="cur:USD")],
+    ])
+
+def main_menu_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=UZ["btn_hisobla"], callback_data="go:hisobla")],
+        [InlineKeyboardButton(text=UZ["btn_balans"], callback_data="go:balans")],
+        [InlineKeyboardButton(text=UZ["btn_hisobot"], callback_data="go:hisobot")],
+        [InlineKeyboardButton(text=UZ["btn_obuna"],  callback_data="go:subs")],
+    ])
+
+def confirm_kb(tx_id: int):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=UZ["btn_ok"], callback_data=f"tx:{tx_id}:ok"),
+            InlineKeyboardButton(text=UZ["btn_no"], callback_data=f"tx:{tx_id}:no"),
+        ],
+        [InlineKeyboardButton(text=UZ["btn_edit"], callback_data=f"tx:{tx_id}:edit")],
+    ])
+
+def balance_post_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=UZ["btn_show_balance"], callback_data="go:balans")]
+    ])
+
+def report_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=UZ["btn_rep_day"], callback_data="rep:day"),
+            InlineKeyboardButton(text=UZ["btn_rep_week"], callback_data="rep:week"),
+            InlineKeyboardButton(text=UZ["btn_rep_month"], callback_data="rep:month"),
+        ]
+    ])
+
+def subs_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=UZ["btn_week"], callback_data="sub:week")],
+        [InlineKeyboardButton(text=UZ["btn_month"], callback_data="sub:month")],
+    ])
