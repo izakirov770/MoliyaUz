@@ -1,4 +1,3 @@
-APP_VERSION = "v2025-09-13-01:10"
 # bot.py
 import asyncio, os, uuid, re
 from datetime import datetime, timedelta, timezone
@@ -46,7 +45,7 @@ def fmt_amount(n):
 # ====== “DB” (RAM) ======
 STEP: Dict[int,str] = {}
 USER_LANG: Dict[int,str] = {}
-SEEN_USERS: set[int] = set()  # eslatmalar uchun
+SEEN_USERS: set[int] = set()
 
 TRIAL_MIN = 15
 TRIAL_START: Dict[int,datetime] = {}
@@ -426,6 +425,11 @@ async def start(m:Message):
     STEP[uid]="lang"
     await m.answer(t_uz("start_choose"), reply_markup=kb_lang())
 
+@rt.message(Command("menu"))
+async def menu_cmd(m: Message):
+    uid = m.from_user.id
+    await m.answer((t_uz if get_lang(uid)=="uz" else t_ru)("menu"), reply_markup=kb_main(get_lang(uid)))
+
 @rt.message(Command("approve"))
 async def approve_cmd(m:Message):
     if ADMIN_ID and m.from_user.id!=ADMIN_ID: return
@@ -436,11 +440,6 @@ async def approve_cmd(m:Message):
     if not pay: await m.answer("pid topilmadi"); return
     pay["status"]="paid"
     await m.answer(f"{pid} -> paid")
-
-@rt.message(Command("menu"))
-async def menu_cmd(m: Message):
-    uid = m.from_user.id
-    await m.answer((t_uz if get_lang(uid)=="uz" else t_ru)("menu"), reply_markup=kb_main(get_lang(uid)))
 
 @rt.message(F.text)
 async def on_text(m:Message):
@@ -474,14 +473,13 @@ async def on_text(m:Message):
         if not tmp:
             STEP[uid]="main"; await m.answer(T("enter_tx"), reply_markup=kb_main(lang)); return
 
-        # QARZNI SAQLAYMIZ
         did = await save_debt(uid, tmp["direction"], tmp["amount"], tmp["currency"], tmp["who"], due)
 
-        # BALANS HARAKATI (DEBT CREATE MOMENT)
+        # Debt create moment -> balansga darhol ta'sir
         if tmp["direction"]=="given":
-            await save_tx(uid,"expense",tmp["amount"],tmp["currency"],"cash","💳 Qarz berildi",f"Qarz berildi: {tmp['who']} (ID {did})")
+            await save_tx(uid,"expense",tmp["amount"],tmp["currency"],"cash","💳 Qarz berildi","")
         else:
-            await save_tx(uid,"income",tmp["amount"],tmp["currency"],"cash","💳 Qarz olindi",f"Qarz olindi: {tmp['who']} (ID {did})")
+            await save_tx(uid,"income",tmp["amount"],tmp["currency"],"cash","💳 Qarz olindi","")
 
         if tmp["direction"]=="mine":
             await m.answer(T("debt_saved_mine", who=tmp["who"], cur=tmp["currency"], amount=fmt_amount(tmp["amount"]), due=due))
@@ -528,11 +526,11 @@ async def on_text(m:Message):
             if due0:
                 did = await save_debt(uid, "mine" if kind=="debt_mine" else "given", amount, curr, who, due0)
 
-                # BALANS HARAKATI (DEBT CREATE MOMENT)
+                # Debt create moment -> balansga darhol ta'sir
                 if kind=="debt_mine":
-                    await save_tx(uid,"income",amount,curr,"cash","💳 Qarz olindi",f"Qarz olindi: {who} (ID {did})")
+                    await save_tx(uid,"income",amount,curr,"cash","💳 Qarz olindi","")
                 else:
-                    await save_tx(uid,"expense",amount,curr,"cash","💳 Qarz berildi",f"Qarz berildi: {who} (ID {did})")
+                    await save_tx(uid,"expense",amount,curr,"cash","💳 Qarz berildi","")
 
                 if kind=="debt_mine":
                     await m.answer(T("debt_saved_mine", who=who, cur=curr, amount=fmt_amount(amount), due=due0))
@@ -556,7 +554,7 @@ async def on_text(m:Message):
             await m.answer(T("tx_exp",date=fmt_date(now_tk()),cur=curr,amount=fmt_amount(amount),cat=cat,desc=t))
         return
 
-    await m.answer(T("enter_text"))
+    await m.answer(T("menu"), reply_markup=kb_main(lang))
 
 @rt.message(F.contact)
 async def on_contact(m:Message):
@@ -564,7 +562,7 @@ async def on_contact(m:Message):
     if STEP.get(uid)!="need_phone": return
     await m.answer((t_uz if get_lang(uid)=="uz" else t_ru)("menu"), reply_markup=kb_main(get_lang(uid))); STEP[uid]="main"
 
-# ====== CALLBACKS ======
+# ====== REPORT/DEBT CALLBACKS ======
 @rt.callback_query(F.data.startswith("rep:"))
 async def rep_cb(c:CallbackQuery):
     uid=c.from_user.id
@@ -590,7 +588,40 @@ async def rep_cb(c:CallbackQuery):
             else: await c.message.answer(txt)
         await c.answer(); return
 
-# ====== ANALIZ HANDLER ======
+@rt.callback_query(F.data.startswith("debt:"))
+async def debt_cb(c:CallbackQuery):
+    uid=c.from_user.id
+    lang=get_lang(uid); T=L(lang)
+    if not has_access(uid): await c.message.answer(block_text(uid), reply_markup=kb_sub(lang)); await c.answer(); return
+    d=c.data.split(":")[1]
+    direction="mine" if d=="mine" else "given"
+    head="🧾 Qarzim ro‘yxati:" if direction=="mine" and lang=="uz" else ("💸 Qarzdorlar ro‘yxati:" if lang=="uz" else ("🧾 Мои долги:" if direction=="mine" else "💸 Должники:"))
+    await c.message.answer(head)
+    debts=[x for x in MEM_DEBTS.get(uid,[]) if x["direction"]==direction]
+    if not debts: await c.message.answer(T("rep_empty")); await c.answer(); return
+    for it in reversed(debts[-10:]):
+        txt=debt_card(it, lang)
+        if it["status"]=="wait": await c.message.answer(txt, reply_markup=kb_debt_done(it["direction"],it["id"], lang))
+        else: await c.message.answer(txt)
+    await c.answer()
+
+@rt.callback_query(F.data.startswith("debtdone:"))
+async def debt_done(c:CallbackQuery):
+    uid=c.from_user.id
+    lang=get_lang(uid)
+    _,direction,sid=c.data.split(":"); did=int(sid)
+    for it in MEM_DEBTS.get(uid,[]):
+        if it["id"]==did:
+            if direction=="mine":
+                it["status"]="paid"       # o'z qarzingizni to'ladingiz -> CHIQIM
+                await save_tx(uid,"expense",it["amount"],it.get("currency","UZS"),"cash","💳 Qarz qaytarildi" if lang=="uz" else "💳 Долг оплачен","")
+            else:
+                it["status"]="received"   # sizga qarz qaytdi -> KIRIM
+                await save_tx(uid,"income",it["amount"],it.get("currency","UZS"),"cash","💳 Qarz qaytdi" if lang=="uz" else "💳 Долг возвращен","")
+            await c.message.edit_text(debt_card(it, lang)); await c.answer(("Holat yangilandi ✅" if lang=="uz" else "Статус обновлён ✅")); return
+    await c.answer(("Topilmadi" if lang=="uz" else "Не найдено"), show_alert=True)
+
+# ====== ANALIZ ======
 @rt.message(Command("analiz"))
 async def analiz_cmd(m: Message):
     uid = m.from_user.id
@@ -624,7 +655,7 @@ async def analiz_cmd(m: Message):
                 "👏 Отлично! В этом месяце доход выше расходов. Дисциплина — огонь, сбережения растут! 💹"
     elif balance_uzs < 0:
         motiv = "⚠️ E'tiborli bo‘laylik: bu oy chiqim daromaddan oshib ketdi. Keyingi oy maqsad — sarfni biroz qisqartirib, kichik jamg‘arma boshlash! ✅" if lang=="uz" else \
-                "⚠️ Внимательнее: в этом месяце расходы превысили доход. Цель на следующий — чуть ужаться и начать маленькую подушку! ✅"
+                "⚠️ Внимательнее: в этом месяце расходы превысили доход. Цель на следующий — немного ужаться и начать подушку! ✅"
     else:
         motiv = "🙂 Balans nolga yaqin. Yaxshi start! Endi har kuni mayda tejamkorlik bilan jamg‘armani yo‘lga qo‘ysak bo‘ladi." if lang=="uz" else \
                 "🙂 Баланс около нуля. Хорошее начало! Понемногу экономим ежедневно — и пойдут сбережения."
@@ -646,39 +677,7 @@ async def analiz_cmd(m: Message):
     )
 
     await m.answer(text)
-
-@rt.callback_query(F.data.startswith("debt:"))
-async def debt_cb(c:CallbackQuery):
-    uid=c.from_user.id
-    lang=get_lang(uid); T=L(lang)
-    if not has_access(uid): await c.message.answer(block_text(uid), reply_markup=kb_sub(lang)); await c.answer(); return
-    d=c.data.split(":")[1]
-    direction="mine" if d=="mine" else "given"
-    head="🧾 Qarzim ro‘yxati:" if direction=="mine" and lang=="uz" else ("💸 Qarzdorlar ro‘yxati:" if lang=="uz" else ("🧾 Мои долги:" if direction=="mine" else "💸 Должники:"))
-    await c.message.answer(head)
-    debts=[x for x in MEM_DEBTS.get(uid,[]) if x["direction"]==direction]
-    if not debts: await c.message.answer(T("rep_empty")); await c.answer(); return
-    for it in reversed(debts[-10:]):
-        txt=debt_card(it, lang)
-        if it["status"]=="wait": await c.message.answer(txt, reply_markup=kb_debt_done(it["direction"],it["id"], lang))
-        else: await c.message.answer(txt)
-    await c.answer()
-
-@rt.callback_query(F.data.startswith("debtdone:"))
-async def debt_done(c:CallbackQuery):
-    uid=c.from_user.id
-    lang=get_lang(uid)
-    _,direction,sid=c.data.split(":"); did=int(sid)
-    for it in MEM_DEBTS.get(uid,[]):
-        if it["id"]==did:
-            if direction=="mine":
-                it["status"]="paid"       # o'z qarzingizni to'ladingiz -> CHIQIM
-                await save_tx(uid,"expense",it["amount"],it.get("currency","UZS"),"cash","💳 Qarz qaytarildi" if lang=="uz" else "💳 Долг оплачен",f"ID {did}")
-            else:
-                it["status"]="received"   # sizga qarz qaytdi -> KIRIM
-                await save_tx(uid,"income",it["amount"],it.get("currency","UZS"),"cash","💳 Qarz qaytdi" if lang=="uz" else "💳 Долг возвращен",f"ID {did}")
-            await c.message.edit_text(debt_card(it, lang)); await c.answer(("Holat yangilandi ✅" if lang=="uz" else "Статус обновлён ✅")); return
-    await c.answer(("Topilmadi" if lang=="uz" else "Не найдено"), show_alert=True)
+    await m.answer(T("menu"), reply_markup=kb_main(lang))
 
 # ------ OBUNA (CLICK flow) ------
 def create_click_link(pid:str, amount:int)->str:
@@ -806,12 +805,17 @@ async def debt_reminder():
 
 # ====== COMMANDS ======
 async def set_cmds():
-    await bot.set_my_commands([
-        BotCommand(command="version", description="Ishlayotgan versiya"),
-        BotCommand(command="start", description="Boshlash / Start"),
-        BotCommand(command="analiz", description="Oylik moliya tahlili"),
-        BotCommand(command="menu", description="Menyuni yangilash"),
-    ])
+    # Eski buyruqlarni tozalaymiz va faqat /start qoldiramiz
+    try:
+        await bot.delete_my_commands()
+        await bot.delete_my_commands(language_code="ru")
+        await bot.delete_my_commands(language_code="uz")
+    except:
+        pass
+    cmds = [BotCommand(command="start", description="Boshlash / Start")]
+    await bot.set_my_commands(cmds)
+    await bot.set_my_commands(cmds, language_code="ru")
+    await bot.set_my_commands(cmds, language_code="uz")
 
 # ====== MAIN ======
 async def main():
