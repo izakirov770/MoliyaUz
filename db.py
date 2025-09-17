@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS users(
   reminder_on INTEGER DEFAULT 1,
   remind_time TEXT DEFAULT '20:00',
   seen_example INTEGER DEFAULT 0,
-  trial_used INTEGER DEFAULT 0
+  trial_used INTEGER DEFAULT 0,
+  activated INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS transactions(
@@ -51,6 +52,33 @@ CREATE TABLE IF NOT EXISTS subs(
   start_at TIMESTAMP,
   end_at TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS cards(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  label TEXT,
+  pan_masked TEXT,
+  owner TEXT,
+  is_default INTEGER DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS debts_archive(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  debt_id INTEGER,
+  user_id INTEGER,
+  direction TEXT,
+  amount INTEGER,
+  currency TEXT,
+  counterparty TEXT,
+  due_date DATE,
+  status TEXT,
+  archived_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS config(
+  key TEXT PRIMARY KEY,
+  value TEXT
+);
 """
 
 async def connect():
@@ -74,6 +102,10 @@ async def _migrate_add_columns(db):
     await ensure_col("users", "seen_example", "INTEGER DEFAULT 0")
     await ensure_col("users", "trial_used", "INTEGER DEFAULT 0")
     await ensure_col("users", "remind_time", "TEXT DEFAULT '20:00'")
+    await ensure_col("users", "activated", "INTEGER DEFAULT 0")
+    await ensure_col("users", "sub_started_at", "TIMESTAMP")
+    await ensure_col("users", "sub_until", "TIMESTAMP")
+    await ensure_col("users", "sub_reminder_sent", "INTEGER DEFAULT 0")
 
     # debts
     await ensure_col("debts", "due_morning_ping", "INTEGER DEFAULT 0")

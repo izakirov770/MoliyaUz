@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Оплата через CLICK</title>
+  <style>
+    .click_logo {
+      padding:4px 10px;
+      cursor:pointer;
+      color: #fff;
+      line-height:190%;
+      font-size: 13px;
+      font-family: Arial;
+      font-weight: bold;
+      text-align: center;
+      border: 1px solid #037bc8;
+      text-shadow: 0px -1px 0px #037bc8;
+      border-radius: 4px;
+      background: #27a8e0;
+      background: -webkit-linear-gradient(#27a8e0 0%, #1c8ed7 100%);
+      background: -moz-linear-gradient(#27a8e0 0%, #1c8ed7 100%);
+      background: -o-linear-gradient(#27a8e0 0%, #1c8ed7 100%);
+      background: linear-gradient(#27a8e0 0%, #1c8ed7 100%);
+      box-shadow: inset 0px 1px 0px #45c4fc;
+      -webkit-border-radius:4px;
+      -moz-border-radius: 4px;
+    }
+    .click_logo i {
+      background: url(https://m.click.uz/static/img/logo.png) no-repeat top left;
+      width:30px;
+      height:25px;
+      display:block;
+      float:left;
+    }
+  </style>
+</head>
+<body>
+  <form id="click_form" action="https://my.click.uz/services/pay" method="get" target="_blank">
+    <input type="hidden" name="amount" value="1000" />
+    <input type="hidden" name="merchant_id" value="46"/>
+    <input type="hidden" name="merchant_user_id" value="4"/>
+    <input type="hidden" name="service_id" value="36"/>
+    <input type="hidden" name="transaction_param" value="user23151"/>
+    <input type="hidden" name="return_url" value="https://ВАШ-САЙТ.uz/payments/return"/>
+    <input type="hidden" name="card_type" value="uzcard"/>
+  <button type="submit" class="click_logo"><i></i>Оплатить через CLICK</button>
+  </form>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script>
+    const qs = new URLSearchParams(location.search);
+    const set = (name, value) => {
+      const el = document.querySelector(`[name="${name}"]`);
+      if (el && value) el.value = value;
+    };
+    set("amount", qs.get("amount"));
+    set("transaction_param", qs.get("invoice_id"));
+    set("return_url", qs.get("return_url"));
+    window.Telegram?.WebApp?.ready();
+  </script>
+</body>
+</html>

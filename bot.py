@@ -1,17 +1,33 @@
 # bot.py
-import asyncio, os, uuid, re
+import asyncio, os, uuid, re, json, logging, sys, types
+import aiosqlite
+from decimal import Decimal
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, List, Tuple
+from zoneinfo import ZoneInfo
+from urllib.parse import quote_plus
+from typing import Optional, Dict, List, Tuple, Any
 
-from aiogram import Bot, Dispatcher, F, Router
+from aiogram import Bot, Dispatcher, F, Router, BaseMiddleware
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import CommandStart, Command
 from aiogram.types import (
     Message, CallbackQuery,
     ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
-    InlineKeyboardMarkup, InlineKeyboardButton, BotCommand,
+    InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, WebAppInfo,
 )
 from dotenv import load_dotenv
+
+from db import DB_PATH
+from payments import (
+    create_invoice as payments_create_invoice,
+    detect_plan as payments_detect_plan,
+    ensure_schema as ensure_payment_schema,
+    get_latest_payment as payments_get_latest_payment,
+)
+from services.payments import create_invoice_id, build_miniapp_url
 
 # ====== ENV ======
 load_dotenv()
@@ -26,16 +42,59 @@ CLICK_MERCHANT_USER_ID = os.getenv("CLICK_MERCHANT_USER_ID", "")
 PAYMENT_RETURN_URL = os.getenv("PAYMENT_RETURN_URL", "")
 USD_UZS = float(os.getenv("USD_UZS", "12600"))
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+SUBSCRIPTION_DAYS = int(os.getenv("SUBSCRIPTION_DAYS", "30"))
+TZ_NAME = os.getenv("TZ", "Asia/Tashkent")
+ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "")
+ADMIN_IDS: set[int] = set()
+for part in ADMIN_IDS_RAW.split(","):
+    part = part.strip()
+    if not part:
+        continue
+    try:
+        ADMIN_IDS.add(int(part))
+    except Exception:
+        continue
+if ADMIN_ID:
+    ADMIN_IDS.add(ADMIN_ID)
+WEB_BASE = os.getenv("WEB_BASE", "http://127.0.0.1:8000")
+RETURN_URL = os.getenv("RETURN_URL", f"{WEB_BASE.rstrip('/')}/payments/return")
+MONTH_PLAN_PRICE = int(os.getenv("MONTH_PLAN_PRICE", "19900"))
+MINI_APP_BASE_URL = f"{WEB_BASE.rstrip('/')}/clickpay/click_form.html"
 
 NOTION_OFER_URL = "https://www.notion.so/OFERA-26a8fa17fd1f803f8025f07f98f89c87?source=copy_link"
+
+# ====== PACKAGE BRIDGE ======
+_BOT_MODULE_PATH = Path(__file__).resolve().parent / "bot"
+if _BOT_MODULE_PATH.exists():
+    _existing_bot = sys.modules.get("bot")
+    if _existing_bot is None:
+        _namespace = types.ModuleType("bot")
+        _namespace.__path__ = [str(_BOT_MODULE_PATH)]
+        sys.modules["bot"] = _namespace
+    elif not hasattr(_existing_bot, "__path__"):
+        _existing_bot.__path__ = [str(_BOT_MODULE_PATH)]
+
+# ====== EXTERNAL MODULES ======
+from bot.keyboards import get_main_menu as _base_main_menu
+from bot.routers.subscription_plans import sub_router, show_subscription_plans
+from bot.routers.cards_router import cards_router as cards_stub_router
+from bot.routers.pay_debug import pay_debug_router
+from subscription import subscription_router
 
 # ====== BOT ======
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 rt = Router()
+reports_range_router = Router()
+cards_router = Router()
+cards_entry_router = Router()
+debts_archive_router = Router()
 
 # ====== VAQT/FMT ======
-TASHKENT = timezone(timedelta(hours=5))
+try:
+    TASHKENT = ZoneInfo(TZ_NAME)
+except Exception:
+    TASHKENT = timezone(timedelta(hours=5))
 now_tk = lambda: datetime.now(TASHKENT)
 fmt_date = lambda d: d.strftime("%d.%m.%Y")
 def fmt_amount(n):
@@ -46,10 +105,294 @@ def fmt_amount(n):
 STEP: Dict[int,str] = {}
 USER_LANG: Dict[int,str] = {}
 SEEN_USERS: set[int] = set()
+USER_ACTIVATED: Dict[int, bool] = {}
+REPORT_RANGE_STATE: Dict[int, Dict[str, str]] = {}
+
+ANALYSIS_COUNTERS: Dict[int, Dict[str, int]] = {}
+LAST_RESET_YYYYMM: Optional[str] = None
+ANALYSIS_STATE_PATH = Path("analysis_state.json")
+
+CARDS: Dict[int, Dict[str, Any]] = {}
+CARDS_FILE = Path("cards.json")
+CARDS_SEQ = 0
+CARD_ADD_STATE: Dict[int, Dict[str, Any]] = {}
+
+DEBTS_ARCHIVE: Dict[int, List[dict]] = {}
+DEBTS_ARCHIVE_FILE = Path("debts_archive.json")
+
+
+class CardAddStates(StatesGroup):
+    pan = State()
+    expires = State()
+    owner = State()
+    label = State()
+
+
+def _load_json(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_json(path: Path, payload: dict) -> None:
+    try:
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, default=str)
+    except Exception:
+        pass
+
+CARDS_SQL = """
+CREATE TABLE IF NOT EXISTS cards(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    label TEXT,
+    pan_masked TEXT,
+    expires TEXT,
+    owner_fullname TEXT,
+    created_by BIGINT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+CARDS_TABLE_READY = False
+
+
+async def ensure_cards_table() -> None:
+    global CARDS_TABLE_READY
+    if CARDS_TABLE_READY:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(CARDS_SQL)
+        await _ensure_card_column(db, "expires", "TEXT")
+        await _ensure_card_column(db, "owner_fullname", "TEXT")
+        await _ensure_card_column(db, "created_by", "BIGINT")
+        await db.commit()
+    CARDS_TABLE_READY = True
+
+
+async def _ensure_card_column(db, column: str, ddl: str) -> None:
+    try:
+        cur = await db.execute("PRAGMA table_info(cards)")
+        cols = [row[1] for row in await cur.fetchall()]
+        if column not in cols:
+            await db.execute(f"ALTER TABLE cards ADD COLUMN {column} {ddl}")
+    except Exception:
+        pass
+
+
+async def fetch_user_cards(uid: int) -> List[Dict[str, Any]]:
+    await ensure_cards_table()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT label, pan_masked, expires, owner_fullname FROM cards WHERE created_by=? ORDER BY datetime(created_at) DESC",
+            (uid,),
+        )
+        rows = await cur.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def insert_user_card(uid: int, label: str, pan_masked: str, expires: str, owner_fullname: str) -> None:
+    await ensure_cards_table()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO cards(label, pan_masked, expires, owner_fullname, created_by) VALUES(?,?,?,?,?)",
+            (label, pan_masked, expires, owner_fullname, uid),
+        )
+        await db.commit()
+
+
+async def present_user_cards(message: Message, lang: str) -> None:
+    uid = message.from_user.id
+    T = L(lang)
+    cards = await fetch_user_cards(uid)
+    if not cards:
+        await message.answer(T("CARDS_EMPTY"), reply_markup=cards_add_inline(lang))
+        await message.answer(T("menu"), reply_markup=get_main_menu(lang))
+        return
+    lines = [T("CARDS_TITLE")]
+    for card in cards:
+        label = card.get("label") or "—"
+        pan = card.get("pan_masked") or "—"
+        expires = card.get("expires") or "—"
+        owner = card.get("owner_fullname") or "—"
+        lines.append(f"• {label} — {pan} — {expires} — {owner}")
+    await message.answer("\n".join(lines), reply_markup=cards_add_inline(lang))
+    await message.answer(T("menu"), reply_markup=get_main_menu(lang))
+
+
+async def handle_cards_open(message: Message, state: FSMContext) -> None:
+    uid = message.from_user.id
+    lang = get_lang(uid)
+    await ensure_month_rollover()
+    await ensure_subscription_state(uid)
+    if not has_access(uid):
+        await send_expired_notice(uid, lang, message.answer)
+        await message.answer(block_text(uid), reply_markup=get_main_menu(lang))
+        return
+    await ensure_cards_table()
+    await state.clear()
+    await present_user_cards(message, lang)
+    return
+def load_cards_storage() -> None:
+    global CARDS_SEQ
+    data = _load_json(CARDS_FILE)
+    cards = data.get("cards") if isinstance(data, dict) else None
+    seq = data.get("seq") if isinstance(data, dict) else None
+    if isinstance(cards, list):
+        for it in cards:
+            if isinstance(it, dict) and "id" in it:
+                try:
+                    cid = int(it["id"])
+                except Exception:
+                    continue
+                card = {
+                    "id": cid,
+                    "label": it.get("label", ""),
+                    "pan_masked": it.get("pan_masked", ""),
+                    "owner": it.get("owner", ""),
+                    "is_default": bool(it.get("is_default")),
+                    "created_at": it.get("created_at", "")
+                }
+                raw_default = it.get("is_default")
+                if isinstance(raw_default, str):
+                    card["is_default"] = raw_default.lower() in ("1","true","ha","yes")
+                elif isinstance(raw_default, (int, bool)):
+                    card["is_default"] = bool(raw_default)
+                CARDS[cid] = card
+    if isinstance(seq, int):
+        CARDS_SEQ = seq
+
+
+def save_cards_storage() -> None:
+    payload = {
+        "seq": CARDS_SEQ,
+        "cards": list(CARDS.values()),
+    }
+    _save_json(CARDS_FILE, payload)
+
+
+def next_card_id() -> int:
+    global CARDS_SEQ
+    CARDS_SEQ += 1
+    return CARDS_SEQ
+
+
+def load_debts_archive() -> None:
+    data = _load_json(DEBTS_ARCHIVE_FILE)
+    items = data.get("items", {}) if isinstance(data, dict) else {}
+    if not isinstance(items, dict):
+        return
+    for k, v in items.items():
+        try:
+            uid = int(k)
+        except Exception:
+            continue
+        if not isinstance(v, list):
+            continue
+        clean: List[dict] = []
+        for it in v:
+            if not isinstance(it, dict):
+                continue
+            copy = dict(it)
+            ts_val = copy.get("ts")
+            if isinstance(ts_val, str):
+                try:
+                    copy["ts"] = datetime.fromisoformat(ts_val)
+                except Exception:
+                    copy["ts"] = now_tk()
+            archived_val = copy.get("archived_at")
+            if isinstance(archived_val, str):
+                try:
+                    copy["archived_at"] = datetime.fromisoformat(archived_val)
+                except Exception:
+                    copy["archived_at"] = now_tk()
+            clean.append(copy)
+        if clean:
+            DEBTS_ARCHIVE[uid] = clean
+
+
+def save_debts_archive() -> None:
+    payload = {"items": {str(uid): items for uid, items in DEBTS_ARCHIVE.items()}}
+    _save_json(DEBTS_ARCHIVE_FILE, payload)
+
+
+def archive_debt_record(uid:int, debt:dict) -> None:
+    items = DEBTS_ARCHIVE.setdefault(uid, [])
+    payload = dict(debt)
+    payload["archived_at"] = now_tk()
+    items.append(payload)
+    save_debts_archive()
+
+
+def load_analysis_state() -> None:
+    global LAST_RESET_YYYYMM
+    data = _load_json(ANALYSIS_STATE_PATH)
+    value = data.get("last_reset") if isinstance(data, dict) else None
+    if isinstance(value, str):
+        LAST_RESET_YYYYMM = value
+
+
+def save_analysis_state() -> None:
+    if LAST_RESET_YYYYMM:
+        _save_json(ANALYSIS_STATE_PATH, {"last_reset": LAST_RESET_YYYYMM})
+
+
+def reset_analysis_counters() -> None:
+    for counters in ANALYSIS_COUNTERS.values():
+        counters["income"] = 0
+        counters["expense"] = 0
+        counters["tx_count"] = 0
+
+
+def update_analysis_counters(uid: int, kind: str, amount: int, currency: str) -> None:
+    counters = ANALYSIS_COUNTERS.setdefault(uid, {"income": 0, "expense": 0, "tx_count": 0})
+    amt_uzs = to_uzs(amount, currency)
+    if kind == "income":
+        counters["income"] += amt_uzs
+    else:
+        counters["expense"] += amt_uzs
+    counters["tx_count"] += 1
+
+
+async def ensure_month_rollover() -> None:
+    global LAST_RESET_YYYYMM
+    if LAST_RESET_YYYYMM is None:
+        load_analysis_state()
+    current = now_tk().strftime("%Y%m")
+    if LAST_RESET_YYYYMM == current:
+        return
+    reset_analysis_counters()
+    LAST_RESET_YYYYMM = current
+    save_analysis_state()
+
+
+async def update_bot_bio(total_users: int) -> None:
+    try:
+        current = await bot.get_my_description()
+        desc = (current.description or "") if current else ""
+    except Exception:
+        desc = ""
+    suffix = f" | Foydalanuvchilar: {total_users}"
+    if " | Foydalanuvchilar:" in desc:
+        new_desc = re.sub(r" \| Foydalanuvchilar: \d+", suffix, desc)
+    else:
+        new_desc = f"{desc}{suffix}" if desc else f"Foydalanuvchilar: {total_users}"
+    try:
+        await bot.set_my_description(new_desc)
+    except Exception:
+        pass
 
 TRIAL_MIN = 15
 TRIAL_START: Dict[int,datetime] = {}
 SUB_EXPIRES: Dict[int,datetime] = {}
+SUB_STARTED: Dict[int,datetime] = {}
+SUB_REMINDER_DONE: Dict[int,bool] = {}
+SUB_EXPIRED_NOTICE: set[int] = set()
 
 # tranzaksiya: {id, ts, kind(income|expense), amount, currency(UZS|USD|EUR), account(cash|card), category, desc}
 MEM_TX: Dict[int, List[dict]] = {}
@@ -65,8 +408,16 @@ PENDING_PAYMENTS: Dict[str,dict] = {}
 DEBT_REMIND_SENT: set[Tuple[int,int,str]] = set()
 
 # ====== UTIL ======
+def is_active(uid:int)->bool:
+    e=SUB_EXPIRES.get(uid)
+    return bool(e and e>=now_tk())
+
 def is_sub(uid):
-    e=SUB_EXPIRES.get(uid); return bool(e and e>now_tk())
+    return is_active(uid)
+
+
+def is_card_admin(uid: int) -> bool:
+    return uid in ADMIN_IDS if ADMIN_IDS else (ADMIN_ID and uid == ADMIN_ID)
 def trial_active(uid):
     s=TRIAL_START.get(uid); return bool(s and (now_tk()-s)<=timedelta(minutes=TRIAL_MIN))
 def has_access(uid): return is_sub(uid) or trial_active(uid)
@@ -74,6 +425,84 @@ def block_text(uid):
     if SUB_EXPIRES.get(uid) and not is_sub(uid): return "⛔️ Obuna muddati tugagan. Obunani yangilang."
     if TRIAL_START.get(uid) and not trial_active(uid): return "⌛️ 15 daqiqalik bepul sinov tugadi. Obuna tanlang."
     return "⛔️ Bu bo‘lim uchun obuna kerak."
+
+
+def _parse_dt(val: Any) -> Optional[datetime]:
+    if not val:
+        return None
+    if isinstance(val, datetime):
+        dt = val
+    else:
+        try:
+            dt = datetime.fromisoformat(str(val))
+        except Exception:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=TASHKENT)
+    return dt.astimezone(TASHKENT)
+
+
+async def ensure_subscription_state(uid: int) -> None:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT sub_started_at, sub_until, sub_reminder_sent FROM users WHERE user_id=?",
+                (uid,),
+            )
+            row = await cur.fetchone()
+    except Exception:
+        row = None
+    if not row:
+        SUB_STARTED.pop(uid, None)
+        SUB_EXPIRES.pop(uid, None)
+        SUB_REMINDER_DONE.pop(uid, None)
+        return
+    start = _parse_dt(row.get("sub_started_at")) if isinstance(row, dict) else _parse_dt(row["sub_started_at"])
+    until = _parse_dt(row.get("sub_until")) if isinstance(row, dict) else _parse_dt(row["sub_until"])
+    reminder_sent_raw = row.get("sub_reminder_sent") if isinstance(row, dict) else row["sub_reminder_sent"]
+    SUB_STARTED[uid] = start or SUB_STARTED.get(uid)
+    if until:
+        SUB_EXPIRES[uid] = until
+    else:
+        SUB_EXPIRES.pop(uid, None)
+    SUB_REMINDER_DONE[uid] = bool(reminder_sent_raw)
+
+
+async def set_user_subscription(uid: int, start_dt: datetime, end_dt: datetime) -> None:
+    start_local = _parse_dt(start_dt) or start_dt.astimezone(TASHKENT)
+    end_local = _parse_dt(end_dt) or end_dt.astimezone(TASHKENT)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT INTO users(user_id) VALUES(?) ON CONFLICT(user_id) DO NOTHING", (uid,))
+        await db.execute(
+            "UPDATE users SET sub_started_at=?, sub_until=?, sub_reminder_sent=0 WHERE user_id=?",
+            (start_local.isoformat(), end_local.isoformat(), uid),
+        )
+        await db.commit()
+    SUB_STARTED[uid] = start_local
+    SUB_EXPIRES[uid] = end_local
+    SUB_REMINDER_DONE[uid] = False
+    SUB_EXPIRED_NOTICE.discard(uid)
+
+
+async def mark_reminder_sent(uid: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET sub_reminder_sent=1 WHERE user_id=?", (uid,)
+        )
+        await db.commit()
+    SUB_REMINDER_DONE[uid] = True
+
+
+async def send_expired_notice(uid: int, lang: str, send_callable) -> None:
+    until = SUB_EXPIRES.get(uid)
+    if until and until < now_tk() and uid not in SUB_EXPIRED_NOTICE:
+        T = L(lang)
+        try:
+            await send_callable(T("sub_expired"))
+        except Exception:
+            pass
+        SUB_EXPIRED_NOTICE.add(uid)
 
 # ---- Localization helpers ----
 def t_uz(k,**kw):
@@ -111,8 +540,58 @@ def t_uz(k,**kw):
         "rep_tx":"📒 Kirim-chiqim",
         "rep_debts":"💳 Qarzlar",
         "rep_day":"Kunlik","rep_week":"Haftalik","rep_month":"Oylik",
+        "rep_range_custom":"📅 Sana bo‘yicha",
+        "rep_range_start":"Boshlanish sanasini kiriting (YYYY-MM-DD).",
+        "rep_range_end":"Tugash sanasini kiriting (YYYY-MM-DD).",
+        "rep_range_invalid":"Sana formati noto‘g‘ri. Masalan: 2024-05-01",
         "rep_line":"{date} — {kind} — {cat} — {amount} {cur}",
         "rep_empty":"Bu bo‘lim uchun yozuv yo‘q.",
+
+        "btn_cards":"💳 Kartalarim",
+        "cards_header":"Kartalar ro‘yxati:",
+        "cards_empty":"Hozircha karta qo‘shilmagan.",
+        "cards_none":"Karta mavjud emas",
+        "card_add_button":"➕ Karta qo‘shish",
+        "cards_line":"{label}\nRaqam: {pan}\nEga: {owner}{default}",
+        "cards_default_tag":" (asosiy)",
+        "card_copy_pan":"📋 Raqamni nusxalash",
+        "card_copy_owner":"📋 Egani nusxalash",
+        "card_added":"Karta qo‘shildi ✅",
+        "card_deleted":"Karta o‘chirildi ✅",
+        "card_not_found":"Karta topilmadi.",
+        "card_delete_btn":"🗑 O‘chirish",
+        "card_add_usage":"Format: /add_card Nomi;8600 1234;Ega;default(0/1)",
+        "card_del_usage":"Format: /del_card <id>",
+        "card_access_denied":"Faqat admin uchun.",
+        "card_add_ask_label":"Karta nomini kiriting:",
+        "card_add_ask_number":"Karta raqamini kiriting:",
+        "card_add_invalid_number":"Karta raqami 16 ta raqamdan iborat bo‘lishi kerak.",
+        "card_add_ask_owner":"Karta egasini kiriting:",
+        "CARDS_TITLE":"Kartalar:",
+        "CARDS_EMPTY":"Karta mavjud emas",
+        "CARDS_ADD_BUTTON":"➕ Karta qo‘shish",
+        "CARDS_ASK_PAN":"Karta raqami (16 ta raqam)",
+        "CARDS_INVALID_PAN":"Karta raqami noto‘g‘ri.",
+        "CARDS_ASK_EXPIRES":"Amal qilish muddati (MM/YY)",
+        "CARDS_INVALID_EXPIRES":"Amal qilish muddati noto‘g‘ri.",
+        "CARDS_ASK_OWNER":"Ism familiyasi (kartadagi)",
+        "CARDS_ASK_LABEL":"Karta nomi (masalan: Uzcard Ofis)",
+        "CARDS_ADDED":"Karta saqlandi ✅",
+        "CARDS_ADMIN_ONLY":"Bu amal faqat admin uchun.",
+        "SUB_OK":"1 oylik obuna faollashdi ✅",
+        "SUB_PENDING":"To‘lov hali tasdiqlanmagan.",
+        "SUB_MISSING":"Avval to‘lov yarating.",
+        "DEBT_REMIND_TO_US":"Bugun mijoz to‘lashi kerak: {fio} — {summa} {valyuta}",
+        "DEBT_REMIND_BY_US":"Bugun siz berishingiz kerak: {kimga} — {summa} {valyuta}",
+        "DEBT_REMIND_EVENING":"Eslatma: bugun muddati: {kimga} — {summa} {valyuta}",
+        "bio_refresh_ok":"Bio yangilandi ✅",
+
+        "debt_archive_btn":"🗂 Arxiv",
+        "debt_archive_header":"🗂 Arxivdagi qarzlar:",
+        "debt_archive_empty":"Arxiv bo‘sh.",
+        "debt_archive_note":"📦 Arxivga o‘tgan sana: {date}",
+
+        "start_gate_msg":"Iltimos, /start bosing",
 
         "debt_menu":"Qarz bo‘limi:",
         "debt_mine":"Qarzim","debt_given":"Qarzdorlar",
@@ -133,6 +612,16 @@ def t_uz(k,**kw):
         "sub_activated":"✅ Obuna faollashtirildi: {plan} (gacha {until})",
         "pay_click":"CLICK orqali to‘lash","pay_check":"To‘lovni tekshirish",
         "pay_checking":"🔄 To‘lov holati tekshirilmoqda…","pay_notfound":"To‘lov topilmadi yoki tasdiqlanmagan.",
+        "pay_status_paid":"✅ To‘lov tasdiqlandi: {plan}\nObuna {until} gacha faollashtirildi.",
+        "pay_status_pending":"⏳ To‘lov hali tasdiqlanmadi. Birozdan so‘ng qayta tekshiring.",
+        "pay_status_missing":"ℹ️ Avval to‘lov yarating.",
+        "sub_ok":"1 oylik obuna faollashdi: {start} → {end}",
+        "sub_remind_1d":"Obunangiz tugashiga 1 kun qoldi: {end}",
+        "sub_expired":"Obunangiz muddati tugadi.",
+        "sub_not_found_or_pending":"To‘lov topilmadi yoki hali tasdiqlanmagan.",
+        "sub_pending_wait":"To‘lov hali tasdiqlanmagan. Iltimos, keyinroq qayta tekshiring.",
+        "sub_create_first":"Avval to‘lov yarating.",
+        "error_generic":"Xatolik yuz berdi.",
 
         "daily":"🕗 Bugungi xarajatlaringizni yozdingizmi? 📝",
         "lang_again":"Tilni tanlang:","enter_text":"Matn yuboring.",
@@ -185,8 +674,58 @@ def t_ru(k, **kw):
         "rep_tx": "📒 Доходы-расходы",
         "rep_debts": "💳 Долги",
         "rep_day": "Дневной", "rep_week": "Недельный", "rep_month": "Месячный",
+        "rep_range_custom": "📅 По дате",
+        "rep_range_start": "Введите начальную дату (YYYY-MM-DD).",
+        "rep_range_end": "Введите конечную дату (YYYY-MM-DD).",
+        "rep_range_invalid": "Неверный формат даты. Например: 2024-05-01",
         "rep_line": "{date} — {kind} — {cat} — {amount} {cur}",
         "rep_empty": "Пока нет записей для этого раздела.",
+
+        "btn_cards": "💳 Мои карты",
+        "cards_header": "Список карт:",
+        "cards_empty": "Карты ещё не добавлены.",
+        "cards_none": "Карта отсутствует",
+        "card_add_button": "➕ Добавить карту",
+        "cards_line": "{label}\nНомер: {pan}\nВладелец: {owner}{default}",
+        "cards_default_tag": " (основная)",
+        "card_copy_pan": "📋 Скопировать номер",
+        "card_copy_owner": "📋 Скопировать владельца",
+        "card_added": "Карта добавлена ✅",
+        "card_deleted": "Карта удалена ✅",
+        "card_not_found": "Карта не найдена.",
+        "card_delete_btn": "🗑 Удалить",
+        "card_add_usage": "Формат: /add_card Название;8600 1234;Владелец;default(0/1)",
+        "card_del_usage": "Формат: /del_card <id>",
+        "card_access_denied": "Только для админа.",
+        "card_add_ask_label": "Введите название карты:",
+        "card_add_ask_number": "Введите номер карты:",
+        "card_add_invalid_number": "Номер карты должен содержать 16 цифр.",
+        "card_add_ask_owner": "Введите владельца карты:",
+        "CARDS_TITLE": "Карты:",
+        "CARDS_EMPTY": "Карта отсутствует",
+        "CARDS_ADD_BUTTON": "➕ Добавить карту",
+        "CARDS_ASK_PAN": "Номер карты (16 цифр)",
+        "CARDS_INVALID_PAN": "Неверный номер карты.",
+        "CARDS_ASK_EXPIRES": "Срок действия (MM/YY)",
+        "CARDS_INVALID_EXPIRES": "Неверный срок действия.",
+        "CARDS_ASK_OWNER": "Имя и фамилия как на карте",
+        "CARDS_ASK_LABEL": "Название карты (например: Uzcard Офис)",
+        "CARDS_ADDED": "Карта сохранена ✅",
+        "CARDS_ADMIN_ONLY": "Эта операция только для админа.",
+        "SUB_OK": "1-месячная подписка активирована ✅",
+        "SUB_PENDING": "Платеж ещё не подтвержден.",
+        "SUB_MISSING": "Сначала создайте платеж.",
+        "DEBT_REMIND_TO_US": "Сегодня клиент должен заплатить: {fio} — {summa} {valyuta}",
+        "DEBT_REMIND_BY_US": "Сегодня вы должны отдать: {kimga} — {summa} {valyuta}",
+        "DEBT_REMIND_EVENING": "Напоминание: сегодня дедлайн: {kimga} — {summa} {valyuta}",
+        "bio_refresh_ok": "Био обновлено ✅",
+
+        "debt_archive_btn": "🗂 Архив",
+        "debt_archive_header": "🗂 Архив долгов:",
+        "debt_archive_empty": "Архив пуст.",
+        "debt_archive_note": "📦 Дата архивирования: {date}",
+
+        "start_gate_msg": "Пожалуйста, нажмите /start",
 
         "debt_menu": "Раздел долги:",
         "debt_mine": "Мой долг", "debt_given": "Должники",
@@ -207,6 +746,16 @@ def t_ru(k, **kw):
         "sub_activated": "✅ Подписка активирована: {plan} (до {until})",
         "pay_click": "Оплатить в CLICK", "pay_check": "Проверить платеж",
         "pay_checking": "🔄 Проверяем статус платежа…", "pay_notfound": "Платеж не найден или не подтвержден.",
+        "pay_status_paid": "✅ Платеж подтвержден: {plan}\nПодписка активна до {until}.",
+        "pay_status_pending": "⏳ Платеж ещё не подтвержден. Попробуйте снова чуть позже.",
+        "pay_status_missing": "ℹ️ Сначала создайте платеж.",
+        "sub_ok": "Подписка на 1 месяц активирована: {start} → {end}",
+        "sub_remind_1d": "До окончания подписки остался 1 день: {end}",
+        "sub_expired": "Срок подписки истек.",
+        "sub_not_found_or_pending": "Платеж не найден или не подтвержден.",
+        "sub_pending_wait": "Платеж ещё не подтвержден. Попробуйте позже.",
+        "error_generic": "Произошла ошибка.",
+        "sub_create_first": "Сначала создайте платеж.",
 
         "daily": "🕗 Вы сегодня записали расходы? 📝",
         "lang_again": "Выберите язык:",
@@ -240,17 +789,42 @@ def kb_share(lang="uz"):
         resize_keyboard=True,one_time_keyboard=True
     )
 
-def kb_main(lang="uz"):
+logger = logging.getLogger(__name__)
+
+
+def get_main_menu(lang: str = "uz") -> ReplyKeyboardMarkup:
+    menu = _base_main_menu()
+    T = L(lang)
+    menu.row(KeyboardButton(text=T("btn_hisobla")))
+    menu.row(KeyboardButton(text=T("btn_hisobot")), KeyboardButton(text=T("btn_qarz")))
+    menu.row(KeyboardButton(text=T("btn_balance")))
+    menu.row(KeyboardButton(text=T("btn_obuna")))
+    menu.row(KeyboardButton(text=T("btn_analiz")), KeyboardButton(text=T("btn_cards")))
+    menu.row(KeyboardButton(text=T("btn_lang")))
+    try:
+        logger.debug(
+            "main_menu_rendered",
+            extra={
+                "rows": [[button.text for button in row] for row in menu.keyboard]
+            },
+        )
+    except Exception:
+        logger.debug("main_menu_rendered")
+    return menu
+
+
+def kb_card_add(lang="uz"):
     T=L(lang)
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=T("btn_hisobla"))],
-            [KeyboardButton(text=T("btn_hisobot")), KeyboardButton(text=T("btn_qarz"))],
-            [KeyboardButton(text=T("btn_balance")), KeyboardButton(text=T("btn_obuna"))],
-            [KeyboardButton(text=T("btn_analiz"))],
-            [KeyboardButton(text=T("btn_lang"))],
-        ], resize_keyboard=True
-    )
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=T("card_add_button"), callback_data="cardadd:start")]
+    ])
+
+
+def cards_add_inline(lang: str = "uz") -> InlineKeyboardMarkup:
+    T = L(lang)
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=T("CARDS_ADD_BUTTON"), callback_data="cards:add")]
+    ])
 
 def kb_oferta(lang="uz"):
     T=L(lang)
@@ -270,14 +844,16 @@ def kb_rep_range(lang="uz"):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=T("rep_day"),callback_data="rep:day")],
         [InlineKeyboardButton(text=T("rep_week"),callback_data="rep:week")],
-        [InlineKeyboardButton(text=T("rep_month"),callback_data="rep:month")]
+        [InlineKeyboardButton(text=T("rep_month"),callback_data="rep:month")],
+        [InlineKeyboardButton(text=T("rep_range_custom"),callback_data="rep:range")]
     ])
 
 def kb_debt_menu(lang="uz"):
     T=L(lang)
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=T("debt_mine"),callback_data="debt:mine")],
-        [InlineKeyboardButton(text=T("debt_given"),callback_data="debt:given")]
+        [InlineKeyboardButton(text=T("debt_given"),callback_data="debt:given")],
+        [InlineKeyboardButton(text=T("debt_archive_btn"),callback_data="debt:archive")]
     ])
 
 def kb_debt_done(direction,debt_id, lang="uz"):
@@ -297,6 +873,15 @@ def kb_sub(lang="uz"):
 def kb_payment(pid, pay_url, lang="uz"):
     T=L(lang)
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=T("pay_click"), url=pay_url)],
+        [InlineKeyboardButton(text=T("pay_check"), callback_data=f"paycheck:{pid}")]
+    ])
+
+
+def kb_payment_with_miniapp(pid: str, pay_url: str, lang: str, mini_url: str) -> InlineKeyboardMarkup:
+    T = L(lang)
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 CLICK (Mini App)", web_app=WebAppInfo(url=mini_url))],
         [InlineKeyboardButton(text=T("pay_click"), url=pay_url)],
         [InlineKeyboardButton(text=T("pay_check"), callback_data=f"paycheck:{pid}")]
     ])
@@ -378,13 +963,16 @@ def next_debt_id(uid:int)->int:
     return MEM_DEBTS_SEQ[uid]
 
 async def save_tx(uid:int, kind:str, amount:int, currency:str, account:str, category:str, desc:str):
+    await ensure_month_rollover()
     MEM_TX.setdefault(uid,[]).append({
         "id": len(MEM_TX.get(uid,[]))+1, "ts": now_tk(),
         "kind":kind, "amount":amount, "currency":currency, "account":account,
         "category":category, "desc":desc
     })
+    update_analysis_counters(uid, kind, amount, currency)
 
 async def save_debt(uid:int, direction:str, amount:int, currency:str, counterparty:str, due:str)->int:
+    await ensure_month_rollover()
     did=next_debt_id(uid)
     MEM_DEBTS.setdefault(uid,[]).append({
         "id":did, "ts":now_tk(), "direction":direction, "amount":amount,
@@ -405,6 +993,51 @@ def report_range(kind:str):
     if kind=="week": return n-timedelta(days=7), n
     return n-timedelta(days=30), n
 
+
+def parse_report_range_date(text:str)->Optional[datetime]:
+    raw=(text or "").strip()
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+        try:
+            dt=datetime.strptime(raw, fmt)
+            return dt
+        except Exception:
+            continue
+    return None
+
+
+class StartGateMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        await ensure_month_rollover()
+        user_id=None
+        if isinstance(event, Message):
+            if not event.from_user:
+                return await handler(event, data)
+            user_id=event.from_user.id
+            USER_ACTIVATED.setdefault(user_id, False)
+            if USER_ACTIVATED.get(user_id):
+                return await handler(event, data)
+            text=event.text or ""
+            if text.startswith("/start"):
+                return await handler(event, data)
+            lang=get_lang(user_id)
+            T=L(lang)
+            await event.answer(T("start_gate_msg"))
+            return
+        if isinstance(event, CallbackQuery):
+            if not event.from_user:
+                return await handler(event, data)
+            user_id=event.from_user.id
+            USER_ACTIVATED.setdefault(user_id, False)
+            if USER_ACTIVATED.get(user_id):
+                return await handler(event, data)
+            lang=get_lang(user_id)
+            T=L(lang)
+            if event.message:
+                await event.message.answer(T("start_gate_msg"))
+            await event.answer()
+            return
+        return await handler(event, data)
+
 # ====== ANALIZ HELPERS ======
 def month_period():
     n = now_tk()
@@ -420,19 +1053,23 @@ def to_uzs(amount:int, currency:str)->int:
 @rt.message(CommandStart())
 async def start(m:Message):
     uid=m.from_user.id
+    USER_ACTIVATED[uid] = True
     SEEN_USERS.add(uid)
     TRIAL_START.setdefault(uid, now_tk())
+    await ensure_month_rollover()
     STEP[uid]="lang"
     await m.answer(t_uz("start_choose"), reply_markup=kb_lang())
 
 @rt.message(Command("menu"))
 async def menu_cmd(m: Message):
     uid = m.from_user.id
-    await m.answer((t_uz if get_lang(uid)=="uz" else t_ru)("menu"), reply_markup=kb_main(get_lang(uid)))
+    await ensure_month_rollover()
+    await m.answer((t_uz if get_lang(uid)=="uz" else t_ru)("menu"), reply_markup=get_main_menu(get_lang(uid)))
 
 @rt.message(Command("approve"))
 async def approve_cmd(m:Message):
     if ADMIN_ID and m.from_user.id!=ADMIN_ID: return
+    await ensure_month_rollover()
     parts=m.text.strip().split()
     if len(parts)!=2: await m.answer("format: /approve <pid>"); return
     pid=parts[1]
@@ -440,6 +1077,32 @@ async def approve_cmd(m:Message):
     if not pay: await m.answer("pid topilmadi"); return
     pay["status"]="paid"
     await m.answer(f"{pid} -> paid")
+
+
+@rt.message(Command("refresh_bio"))
+async def refresh_bio_cmd(m:Message):
+    if ADMIN_ID and m.from_user.id!=ADMIN_ID:
+        return
+    await ensure_month_rollover()
+    total_users = sum(1 for _, flag in USER_ACTIVATED.items() if flag) or len(SEEN_USERS)
+    await update_bot_bio(total_users)
+    lang=get_lang(m.from_user.id)
+    T=L(lang)
+    await m.answer(T("bio_refresh_ok"))
+
+
+@rt.message(F.text.in_({"📊 Analiz", "Analiz"}))
+async def analiz_button_handler(m: Message):
+    uid = m.from_user.id
+    lang = get_lang(uid)
+    await ensure_month_rollover()
+    await ensure_subscription_state(uid)
+    if not has_access(uid):
+        await send_expired_notice(uid, lang, m.answer)
+        await m.answer(block_text(uid), reply_markup=get_main_menu(lang))
+        return
+    await analiz_cmd(m)
+
 
 @rt.message(F.text)
 async def on_text(m:Message):
@@ -449,79 +1112,187 @@ async def on_text(m:Message):
 
     lang = get_lang(uid)
     T = L(lang)
+    try:
+        await ensure_month_rollover()
+        await ensure_subscription_state(uid)
 
-    if step=="lang":
-        low=t.lower()
-        if "uz" in low or "o‘z" in low or "o'z" in low: USER_LANG[uid]="uz"
-        elif "рус" in low or "ru" in low: USER_LANG[uid]="ru"
-        else: return
-        STEP[uid]="name"
-        await m.answer((t_uz if get_lang(uid)=="uz" else t_ru)("ask_name"), reply_markup=ReplyKeyboardRemove()); return
+        if step is None and not USER_ACTIVATED.get(uid):
+            USER_ACTIVATED.setdefault(uid, False)
 
-    if step=="name":
-        lang=get_lang(uid); T=L(lang)
-        await m.answer(T("welcome"), reply_markup=kb_share(lang))
-        await m.answer("—", reply_markup=kb_oferta(lang))
-        STEP[uid]="need_phone"; return
+        if step=="report_range_start":
+            parsed=parse_report_range_date(t)
+            if not parsed:
+                await m.answer(T("rep_range_invalid")); return
+            REPORT_RANGE_STATE[uid]={"start": parsed.strftime("%Y-%m-%d")}
+            STEP[uid]="report_range_end"
+            await m.answer(T("rep_range_end")); return
 
-    if step=="need_phone": return
+        if step=="report_range_end":
+            parsed=parse_report_range_date(t)
+            if not parsed:
+                await m.answer(T("rep_range_invalid")); return
+            payload=REPORT_RANGE_STATE.get(uid, {})
+            start_str=payload.get("start")
+            if not start_str:
+                STEP[uid]="main"
+                await m.answer(T("menu"), reply_markup=get_main_menu(lang)); return
+            start_dt=datetime.strptime(start_str, "%Y-%m-%d")
+            end_dt=parsed
+            if end_dt < start_dt:
+                start_dt, end_dt = end_dt, start_dt
+            since=datetime(start_dt.year,start_dt.month,start_dt.day,tzinfo=TASHKENT)
+            until=datetime(end_dt.year,end_dt.month,end_dt.day,23,59,59,tzinfo=TASHKENT)
+            items=[it for it in MEM_TX.get(uid,[]) if since<=it["ts"]<=until]
+            if not items:
+                await m.answer(T("rep_empty"))
+            else:
+                lines=[]
+                for it in items:
+                    lines.append(T("rep_line",date=fmt_date(it["ts"]),kind=("Kirim" if it["kind"]=="income" else ("Расход" if lang=="ru" else "Chiqim")),cat=it["category"],amount=fmt_amount(it["amount"]),cur=it["currency"]))
+                await m.answer("\n".join(lines))
+            REPORT_RANGE_STATE.pop(uid, None)
+            STEP[uid]="main"
+            await m.answer(T("menu"), reply_markup=get_main_menu(lang)); return
 
-    if step in ("debt_mine_due","debt_given_due"):
-        due=parse_due_date(t)
-        if not due: await m.answer(T("date_need")); return
-        tmp=PENDING_DEBT.get(uid)
-        if not tmp:
-            STEP[uid]="main"; await m.answer(T("enter_tx"), reply_markup=kb_main(lang)); return
+        if step=="lang":
+            low=t.lower()
+            if "uz" in low or "o‘z" in low or "o'z" in low: USER_LANG[uid]="uz"
+            elif "рус" in low or "ru" in low: USER_LANG[uid]="ru"
+            else: return
+            STEP[uid]="name"
+            await m.answer((t_uz if get_lang(uid)=="uz" else t_ru)("ask_name"), reply_markup=ReplyKeyboardRemove()); return
 
-        did = await save_debt(uid, tmp["direction"], tmp["amount"], tmp["currency"], tmp["who"], due)
+        if step=="name":
+            lang=get_lang(uid); T=L(lang)
+            await m.answer(T("welcome"), reply_markup=kb_share(lang))
+            await m.answer("—", reply_markup=kb_oferta(lang))
+            STEP[uid]="need_phone"; return
 
-        # Debt create moment -> balansga darhol ta'sir
-        if tmp["direction"]=="given":
-            await save_tx(uid,"expense",tmp["amount"],tmp["currency"],"cash","💳 Qarz berildi","")
-        else:
-            await save_tx(uid,"income",tmp["amount"],tmp["currency"],"cash","💳 Qarz olindi","")
+        if step=="need_phone": return
 
-        if tmp["direction"]=="mine":
-            await m.answer(T("debt_saved_mine", who=tmp["who"], cur=tmp["currency"], amount=fmt_amount(tmp["amount"]), due=due))
-        else:
-            await m.answer(T("debt_saved_given", who=tmp["who"], cur=tmp["currency"], amount=fmt_amount(tmp["amount"]), due=due))
-        PENDING_DEBT.pop(uid, None); STEP[uid]="main"; return
+        if step=="card_add_label":
+            if not t:
+                await m.answer(T("card_add_ask_label")); return
+            draft=CARD_ADD_STATE.setdefault(uid, {})
+            draft["label"] = t
+            STEP[uid]="card_add_number"
+            await m.answer(T("card_add_ask_number")); return
 
-    # menyular
-    if t==T("btn_hisobla"):
-        if not has_access(uid): await m.answer(block_text(uid), reply_markup=kb_sub(lang)); return
-        STEP[uid]="input_tx"; await m.answer(T("enter_tx"), reply_markup=kb_main(lang)); return
+        if step=="card_add_number":
+            digits=re.sub(r"\D", "", t)
+            if len(digits)!=16:
+                await m.answer(T("card_add_invalid_number")); return
+            formatted=" ".join(digits[i:i+4] for i in range(0, len(digits), 4))
+            draft=CARD_ADD_STATE.setdefault(uid, {})
+            draft["pan_masked"] = formatted
+            STEP[uid]="card_add_owner"
+            await m.answer(T("card_add_ask_owner")); return
 
-    if t==T("btn_hisobot"):
-        if not has_access(uid): await m.answer(block_text(uid), reply_markup=kb_sub(lang)); return
-        await m.answer(T("report_main"), reply_markup=kb_rep_main(lang)); return
+        if step=="card_add_owner":
+            if not t:
+                await m.answer(T("card_add_ask_owner")); return
+            draft=CARD_ADD_STATE.get(uid)
+            if not draft or "label" not in draft:
+                CARD_ADD_STATE[uid] = {}
+                STEP[uid]="card_add_label"
+                await m.answer(T("card_add_ask_label")); return
+            if "pan_masked" not in draft:
+                STEP[uid]="card_add_number"
+                await m.answer(T("card_add_ask_number")); return
+            label=draft.get("label")
+            pan=draft.get("pan_masked")
+            is_default=not any(it.get("is_default") for it in CARDS.values())
+            card_id=next_card_id()
+            CARDS[card_id]={
+                "id":card_id,
+                "label":label,
+                "pan_masked":pan,
+                "owner":t,
+                "is_default":is_default,
+                "created_at":now_tk().isoformat()
+            }
+            CARD_ADD_STATE.pop(uid, None)
+            save_cards_storage()
+            STEP[uid]="main"
+            await m.answer(T("card_added"))
+            await send_cards_list(uid, m, lang)
+            return
 
-    if t==T("btn_qarz"):
-        if not has_access(uid): await m.answer(block_text(uid), reply_markup=kb_sub(lang)); return
-        await m.answer(T("debt_menu"), reply_markup=kb_debt_menu(lang)); return
+        if step in ("debt_mine_due","debt_given_due"):
+            due=parse_due_date(t)
+            if not due: await m.answer(T("date_need")); return
+            tmp=PENDING_DEBT.get(uid)
+            if not tmp:
+                STEP[uid]="main"; await m.answer(T("enter_tx"), reply_markup=get_main_menu(lang)); return
 
-    if t==T("btn_balance"):
-        await send_balance(uid, m); return
+            did = await save_debt(uid, tmp["direction"], tmp["amount"], tmp["currency"], tmp["who"], due)
 
-    if t==T("btn_obuna"):
-        await m.answer(T("sub_choose"), reply_markup=kb_sub(lang)); return
+            # Debt create moment -> balansga darhol ta'sir
+            if tmp["direction"]=="given":
+                await save_tx(uid,"expense",tmp["amount"],tmp["currency"],"cash","💳 Qarz berildi","")
+            else:
+                await save_tx(uid,"income",tmp["amount"],tmp["currency"],"cash","💳 Qarz olindi","")
 
-    if t==T("btn_analiz"):
-        if not has_access(uid): await m.answer(block_text(uid), reply_markup=kb_sub(lang)); return
-        await analiz_cmd(m); return
+            if tmp["direction"]=="mine":
+                await m.answer(T("debt_saved_mine", who=tmp["who"], cur=tmp["currency"], amount=fmt_amount(tmp["amount"]), due=due))
+            else:
+                await m.answer(T("debt_saved_given", who=tmp["who"], cur=tmp["currency"], amount=fmt_amount(tmp["amount"]), due=due))
+            PENDING_DEBT.pop(uid, None); STEP[uid]="main"; return
 
-    if t==T("btn_lang"):
-        STEP[uid]="lang"; await m.answer(T("lang_again"), reply_markup=kb_lang()); return
+        # menyular
+        if t==T("btn_hisobla"):
+            if not has_access(uid):
+                await send_expired_notice(uid, lang, m.answer)
+                await m.answer(block_text(uid), reply_markup=kb_sub(lang)); return
+            STEP[uid]="input_tx"; await m.answer(T("enter_tx"), reply_markup=get_main_menu(lang)); return
 
-    # hisobla input
-    if step=="input_tx":
-        if not has_access(uid): await m.answer(block_text(uid), reply_markup=kb_sub(lang)); return
-        kind=guess_kind(t)
-        if kind in ("debt_mine","debt_given"):
-            amount=parse_amount(t) or 0
-            if amount<=0: await m.answer(T("debt_need")); return
-            curr=detect_currency(t); who=parse_counterparty(t)
-            due0=parse_due_date(t)
+        if t==T("btn_hisobot"):
+            if not has_access(uid):
+                await send_expired_notice(uid, lang, m.answer)
+                await m.answer(block_text(uid), reply_markup=kb_sub(lang)); return
+            await m.answer(T("report_main"), reply_markup=kb_rep_main(lang)); return
+
+        if t==T("btn_qarz"):
+            if not has_access(uid):
+                await send_expired_notice(uid, lang, m.answer)
+                await m.answer(block_text(uid), reply_markup=kb_sub(lang)); return
+            await m.answer(T("debt_menu"), reply_markup=kb_debt_menu(lang)); return
+
+        if t==T("btn_balance"):
+            await send_balance(uid, m); return
+
+        if t==T("btn_obuna"):
+            await show_subscription_plans(m)
+            await m.answer(T("sub_choose"), reply_markup=kb_sub(lang)); return
+
+        if t==T("btn_analiz"):
+            if not has_access(uid):
+                await send_expired_notice(uid, lang, m.answer)
+                await m.answer(block_text(uid), reply_markup=get_main_menu(lang))
+                return
+            await analiz_cmd(m); return
+
+        if t==T("btn_cards"):
+            if not has_access(uid):
+                await send_expired_notice(uid, lang, m.answer)
+                await m.answer(block_text(uid), reply_markup=get_main_menu(lang))
+                return
+            await send_cards_list(uid, m, lang); return
+
+        if t==T("btn_lang"):
+            STEP[uid]="lang"; await m.answer(T("lang_again"), reply_markup=kb_lang()); return
+
+        # hisobla input
+        if step=="input_tx":
+            if not has_access(uid):
+                await send_expired_notice(uid, lang, m.answer)
+                await m.answer(block_text(uid), reply_markup=kb_sub(lang)); return
+            kind=guess_kind(t)
+            if kind in ("debt_mine","debt_given"):
+                amount=parse_amount(t) or 0
+                if amount<=0: await m.answer(T("debt_need")); return
+                curr=detect_currency(t); who=parse_counterparty(t)
+                due0=parse_due_date(t)
 
             if due0:
                 did = await save_debt(uid, "mine" if kind=="debt_mine" else "given", amount, curr, who, due0)
@@ -554,21 +1325,87 @@ async def on_text(m:Message):
             await m.answer(T("tx_exp",date=fmt_date(now_tk()),cur=curr,amount=fmt_amount(amount),cat=cat,desc=t))
         return
 
-    await m.answer(T("menu"), reply_markup=kb_main(lang))
+        await m.answer(T("menu"), reply_markup=get_main_menu(lang))
+    except Exception as exc:
+        logger.exception("on_text_error", exc_info=exc)
+        await m.answer(T("error_generic"), reply_markup=get_main_menu(lang))
 
 @rt.message(F.contact)
 async def on_contact(m:Message):
     uid=m.from_user.id
     if STEP.get(uid)!="need_phone": return
-    await m.answer((t_uz if get_lang(uid)=="uz" else t_ru)("menu"), reply_markup=kb_main(get_lang(uid))); STEP[uid]="main"
+    await ensure_month_rollover()
+    await m.answer((t_uz if get_lang(uid)=="uz" else t_ru)("menu"), reply_markup=get_main_menu(get_lang(uid))); STEP[uid]="main"
 
 # ====== REPORT/DEBT CALLBACKS ======
+@reports_range_router.callback_query(F.data=="rep:range")
+async def report_range_custom_cb(c:CallbackQuery):
+    uid=c.from_user.id
+    lang=get_lang(uid); T=L(lang)
+    await ensure_month_rollover()
+    await ensure_subscription_state(uid)
+    if not has_access(uid):
+        await send_expired_notice(uid, lang, c.message.answer)
+        await c.message.answer(block_text(uid), reply_markup=kb_sub(lang))
+        await c.answer()
+        return
+    STEP[uid]="report_range_start"
+    REPORT_RANGE_STATE.pop(uid, None)
+    await c.message.answer(T("rep_range_start"))
+    await c.answer()
+
+
+@debts_archive_router.callback_query(F.data=="debt:archive")
+async def debt_archive_cb(c:CallbackQuery):
+    uid=c.from_user.id
+    lang=get_lang(uid); T=L(lang)
+    await ensure_month_rollover()
+    await ensure_subscription_state(uid)
+    items=DEBTS_ARCHIVE.get(uid, [])
+    if not items:
+        await c.message.answer(T("debt_archive_empty"))
+        await c.answer()
+        return
+    await c.message.answer(T("debt_archive_header"))
+    for it in reversed(items[-10:]):
+        copy=dict(it)
+        ts_val=copy.get("ts")
+        if isinstance(ts_val, str):
+            try:
+                copy["ts"]=datetime.fromisoformat(ts_val)
+            except Exception:
+                copy["ts"]=now_tk()
+        elif not isinstance(ts_val, datetime):
+            copy["ts"]=now_tk()
+        text=debt_card(copy, lang)
+        arch_val=copy.get("archived_at")
+        if isinstance(arch_val, str):
+            try:
+                arch_dt=datetime.fromisoformat(arch_val)
+            except Exception:
+                arch_dt=None
+        elif isinstance(arch_val, datetime):
+            arch_dt=arch_val
+        else:
+            arch_dt=None
+        if arch_dt:
+            text+=f"\n{T('debt_archive_note', date=fmt_date(arch_dt))}"
+        await c.message.answer(text)
+    await c.answer()
+
+
 @rt.callback_query(F.data.startswith("rep:"))
 async def rep_cb(c:CallbackQuery):
     uid=c.from_user.id
     lang=get_lang(uid); T=L(lang)
-    if not has_access(uid): await c.message.answer(block_text(uid), reply_markup=kb_sub(lang)); await c.answer(); return
+    await ensure_month_rollover()
+    await ensure_subscription_state(uid)
+    if not has_access(uid):
+        await send_expired_notice(uid, lang, c.message.answer)
+        await c.message.answer(block_text(uid), reply_markup=kb_sub(lang)); await c.answer(); return
     kind=c.data.split(":")[1]
+    if kind=="range":
+        return
     if kind=="tx":
         await c.message.answer(T("report_main"), reply_markup=kb_rep_range(lang)); await c.answer(); return
     if kind in ("day","week","month"):
@@ -592,8 +1429,11 @@ async def rep_cb(c:CallbackQuery):
 async def debt_cb(c:CallbackQuery):
     uid=c.from_user.id
     lang=get_lang(uid); T=L(lang)
+    await ensure_month_rollover()
     if not has_access(uid): await c.message.answer(block_text(uid), reply_markup=kb_sub(lang)); await c.answer(); return
     d=c.data.split(":")[1]
+    if d=="archive":
+        return
     direction="mine" if d=="mine" else "given"
     head="🧾 Qarzim ro‘yxati:" if direction=="mine" and lang=="uz" else ("💸 Qarzdorlar ro‘yxati:" if lang=="uz" else ("🧾 Мои долги:" if direction=="mine" else "💸 Должники:"))
     await c.message.answer(head)
@@ -609,6 +1449,8 @@ async def debt_cb(c:CallbackQuery):
 async def debt_done(c:CallbackQuery):
     uid=c.from_user.id
     lang=get_lang(uid)
+    await ensure_month_rollover()
+    T=L(lang)
     _,direction,sid=c.data.split(":"); did=int(sid)
     for it in MEM_DEBTS.get(uid,[]):
         if it["id"]==did:
@@ -618,7 +1460,24 @@ async def debt_done(c:CallbackQuery):
             else:
                 it["status"]="received"   # sizga qarz qaytdi -> KIRIM
                 await save_tx(uid,"income",it["amount"],it.get("currency","UZS"),"cash","💳 Qarz qaytdi" if lang=="uz" else "💳 Долг возвращен","")
-            await c.message.edit_text(debt_card(it, lang)); await c.answer(("Holat yangilandi ✅" if lang=="uz" else "Статус обновлён ✅")); return
+            archive_debt_record(uid, it)
+            MEM_DEBTS[uid]=[d for d in MEM_DEBTS.get(uid,[]) if d.get("id")!=did]
+            note_date = fmt_date(now_tk())
+            archived_items = DEBTS_ARCHIVE.get(uid, [])
+            if archived_items:
+                arch_last = next((item for item in reversed(archived_items) if item.get("id")==did), archived_items[-1])
+                arch_dt = arch_last.get("archived_at")
+                if isinstance(arch_dt, datetime):
+                    note_date = fmt_date(arch_dt)
+                elif isinstance(arch_dt, str):
+                    try:
+                        note_date = fmt_date(datetime.fromisoformat(arch_dt))
+                    except Exception:
+                        note_date = arch_dt
+            text = debt_card(it, lang) + f"\n{T('debt_archive_note', date=note_date)}"
+            await c.message.edit_text(text)
+            await c.answer(("Holat yangilandi ✅" if lang=="uz" else "Статус обновлён ✅"))
+            return
     await c.answer(("Topilmadi" if lang=="uz" else "Не найдено"), show_alert=True)
 
 # ====== ANALIZ ======
@@ -626,6 +1485,12 @@ async def debt_done(c:CallbackQuery):
 async def analiz_cmd(m: Message):
     uid = m.from_user.id
     lang=get_lang(uid); T=L(lang)
+    await ensure_month_rollover()
+    await ensure_subscription_state(uid)
+    if not has_access(uid):
+        await send_expired_notice(uid, lang, m.answer)
+        await m.answer(block_text(uid), reply_markup=get_main_menu(lang))
+        return
     since, until = month_period()
     items = [it for it in MEM_TX.get(uid, []) if since <= it["ts"] <= until]
 
@@ -677,7 +1542,7 @@ async def analiz_cmd(m: Message):
     )
 
     await m.answer(text)
-    await m.answer(T("menu"), reply_markup=kb_main(lang))
+    await m.answer(T("menu"), reply_markup=get_main_menu(lang))
 
 # ------ OBUNA (CLICK flow) ------
 def create_click_link(pid:str, amount:int)->str:
@@ -689,7 +1554,7 @@ def create_click_link(pid:str, amount:int)->str:
         f"&amount={amount}"
     )
     if PAYMENT_RETURN_URL:
-        params += f"&return_url={PAYMENT_RETURN_URL}"
+        params += f"&return_url={quote_plus(PAYMENT_RETURN_URL)}"
     return f"{CLICK_PAY_URL_BASE}?{params}"
 
 @rt.callback_query(F.data.startswith("sub:"))
@@ -697,14 +1562,35 @@ async def sub_cb(c:CallbackQuery):
     uid=c.from_user.id
     lang=get_lang(uid); T=L(lang)
     code=c.data.split(":")[1]
+    use_miniapp = False
     if code=="week":
         plan=T("sub_week"); days=7; price=7900
     else:
-        plan=T("sub_month"); days=30; price=19900
+        plan=T("sub_month"); days=30; price=MONTH_PLAN_PRICE
+        use_miniapp = True
+    invoice_id = await payments_create_invoice(uid, Decimal(price), "UZS")
     pid=str(uuid.uuid4())
-    PENDING_PAYMENTS[pid]={"uid":uid,"plan":plan,"period_days":days,"amount":price,"currency":"UZS","status":"pending","created":now_tk()}
+    pid=invoice_id
+    plan_info = payments_detect_plan(Decimal(price))
+    plan_key = plan_info[0] if plan_info else None
+    PENDING_PAYMENTS[pid]={
+        "uid":uid,
+        "invoice_id":pid,
+        "plan":plan,
+        "plan_key":plan_key,
+        "period_days":days,
+        "amount":price,
+        "currency":"UZS",
+        "status":"pending",
+        "created":now_tk()
+    }
     link=create_click_link(pid, price)
-    await c.message.answer(T("sub_created", plan=plan, amount=price), reply_markup=kb_payment(pid, link, lang))
+    if use_miniapp:
+        mini_url = build_miniapp_url(WEB_BASE, price, invoice_id, RETURN_URL)
+        markup = kb_payment_with_miniapp(pid, link, lang, mini_url)
+    else:
+        markup = kb_payment(pid, link, lang)
+    await c.message.answer(T("sub_created", plan=plan, amount=price), reply_markup=markup)
     await c.answer()
 
 @rt.callback_query(F.data.startswith("paycheck:"))
@@ -714,15 +1600,79 @@ async def paycheck_cb(c:CallbackQuery):
     lang=get_lang(pay["uid"]) if pay else get_lang(c.from_user.id)
     T=L(lang)
     await c.message.answer(T("pay_checking"))
-    if not pay or pay["status"]!="paid":
-        await c.message.answer(T("pay_notfound"))
-        await c.answer(); return
-    uid=pay["uid"]; until=now_tk()+timedelta(days=pay["period_days"])
+    await ensure_subscription_state(c.from_user.id)
+    record = await payments_get_latest_payment(c.from_user.id)
+    if not record:
+        await c.message.answer(T("pay_status_missing"), reply_markup=get_main_menu(lang))
+        await c.message.answer(T("sub_create_first"), reply_markup=get_main_menu(lang))
+        await c.message.answer(T("SUB_MISSING"), reply_markup=get_main_menu(lang))
+        await c.answer()
+        return
+    status = (record.get("status") or "").lower()
+    amount_dec = Decimal(str(record.get("amount", "0")))
+    plan_info = payments_detect_plan(amount_dec)
+    plan_key = plan_info[0] if plan_info else (pay.get("plan_key") if pay else None)
+    period_days = plan_info[1] if plan_info else (pay.get("period_days") if pay else 0)
+    plan_label = T(plan_key) if plan_key else (pay["plan"] if pay else "")
+    if not plan_label:
+        if amount_dec == Decimal("7900"):
+            plan_label = T("sub_week")
+            period_days = period_days or 7
+        elif amount_dec == Decimal("19900"):
+            plan_label = T("sub_month")
+            period_days = period_days or 30
+    if period_days <= 0:
+        period_days = (pay.get("period_days") if pay else 0) or 30
+    if status != "paid":
+        await c.message.answer(T("pay_status_pending"), reply_markup=get_main_menu(lang))
+        await c.message.answer(T("sub_pending_wait"), reply_markup=get_main_menu(lang))
+        await c.message.answer(T("SUB_PENDING"), reply_markup=get_main_menu(lang))
+        await c.answer()
+        return
+    paid_iso = record.get("paid_at")
+    try:
+        paid_dt = datetime.fromisoformat(paid_iso) if paid_iso else now_tk()
+        if paid_dt.tzinfo is None:
+            paid_dt = paid_dt.replace(tzinfo=timezone.utc)
+        paid_dt = paid_dt.astimezone(TASHKENT)
+    except Exception:
+        paid_dt = now_tk()
+    until = paid_dt + timedelta(days=period_days or 0)
+    if period_days <= 0 and pay:
+        until = now_tk() + timedelta(days=pay.get("period_days", 0))
+    uid = record.get("user_id") or c.from_user.id
     SUB_EXPIRES[uid]=until
-    await c.message.answer(T("sub_activated", plan=pay["plan"], until=fmt_date(until)))
+    await set_user_subscription(uid, paid_dt, until)
+    if pay:
+        pay["status"]="paid"
+    await c.message.answer(T("pay_status_paid", plan=plan_label, until=fmt_date(until)), reply_markup=get_main_menu(lang))
+    await c.message.answer(T("sub_ok", start=fmt_date(paid_dt), end=fmt_date(until)), reply_markup=get_main_menu(lang))
+    await c.message.answer(T("SUB_OK"), reply_markup=get_main_menu(lang))
     await c.answer()
 
 # ====== BALANS ======
+def card_actions_kb(card_id:int, lang:str, is_admin:bool)->InlineKeyboardMarkup:
+    T=L(lang)
+    buttons=[[InlineKeyboardButton(text=T("card_copy_pan"), callback_data=f"cardcopy:num:{card_id}")],
+             [InlineKeyboardButton(text=T("card_copy_owner"), callback_data=f"cardcopy:owner:{card_id}")]]
+    if is_admin:
+        buttons.append([InlineKeyboardButton(text=T("card_delete_btn"), callback_data=f"carddel:{card_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+async def send_cards_list(uid:int, m:Message, lang:str)->None:
+    T=L(lang)
+    if not CARDS:
+        await m.answer(T("cards_none"), reply_markup=kb_card_add(lang))
+        return
+    await m.answer(T("cards_header"))
+    for card in sorted(CARDS.values(), key=lambda x: x.get("created_at", "")):
+        default_tag = T("cards_default_tag") if card.get("is_default") else ""
+        text=T("cards_line", label=card.get("label","—"), pan=card.get("pan_masked","—"), owner=card.get("owner","—"), default=default_tag)
+        kb=card_actions_kb(card.get("id"), lang, bool(ADMIN_ID and uid==ADMIN_ID))
+        await m.answer(text, reply_markup=kb)
+
+
 async def send_balance(uid:int, m:Message):
     sums={("cash","UZS"):0,("cash","USD"):0,("card","UZS"):0,("card","USD"):0}
     for it in MEM_TX.get(uid,[]):
@@ -752,6 +1702,117 @@ async def send_balance(uid:int, m:Message):
         i_uzs=fmt_amount(i_uzs), i_usd=fmt_amount(i_usd)
     )
     await m.answer(txt)
+
+
+# ====== CARDS MANAGEMENT ======
+@cards_router.callback_query(F.data=="cardadd:start")
+async def card_add_start_cb(c:CallbackQuery):
+    uid=c.from_user.id
+    lang=get_lang(uid)
+    T=L(lang)
+    await ensure_month_rollover()
+    CARD_ADD_STATE.pop(uid, None)
+    STEP[uid]="card_add_label"
+    await c.message.answer(T("card_add_ask_label"))
+    await c.answer()
+
+
+@cards_router.message(Command("add_card"))
+async def add_card_cmd(m:Message):
+    if ADMIN_ID and m.from_user.id!=ADMIN_ID:
+        await m.answer(L(get_lang(m.from_user.id))("card_access_denied"))
+        return
+    await ensure_month_rollover()
+    parts=m.text.split(maxsplit=1)
+    lang=get_lang(m.from_user.id); T=L(lang)
+    if len(parts)<2:
+        await m.answer(T("card_add_usage"))
+        return
+    fields=[p.strip() for p in parts[1].split(";")]
+    if len(fields)<3:
+        await m.answer(T("card_add_usage"))
+        return
+    label, pan, owner = fields[0], fields[1], fields[2]
+    is_default=False
+    if len(fields)>3:
+        is_default = fields[3] in ("1","true","True","ha","yes")
+    if is_default:
+        for it in CARDS.values():
+            it["is_default"] = False
+    card_id=next_card_id()
+    CARDS[card_id]={
+        "id":card_id,
+        "label":label,
+        "pan_masked":pan,
+        "owner":owner,
+        "is_default":is_default,
+        "created_at":now_tk().isoformat()
+    }
+    save_cards_storage()
+    await m.answer(T("card_added"))
+
+
+@cards_router.message(Command("del_card"))
+async def del_card_cmd(m:Message):
+    if ADMIN_ID and m.from_user.id!=ADMIN_ID:
+        await m.answer(L(get_lang(m.from_user.id))("card_access_denied"))
+        return
+    await ensure_month_rollover()
+    parts=m.text.strip().split()
+    lang=get_lang(m.from_user.id); T=L(lang)
+    if len(parts)!=2:
+        await m.answer(T("card_del_usage"))
+        return
+    try:
+        cid=int(parts[1])
+    except Exception:
+        await m.answer(T("card_del_usage"))
+        return
+    card=CARDS.pop(cid, None)
+    if not card:
+        await m.answer(T("card_not_found"))
+        return
+    save_cards_storage()
+    await m.answer(T("card_deleted"))
+
+
+@cards_router.callback_query(F.data.startswith("cardcopy:"))
+async def card_copy_cb(c:CallbackQuery):
+    await ensure_month_rollover()
+    parts=c.data.split(":")
+    if len(parts)!=3:
+        await c.answer(); return
+    _, mode, sid = parts
+    try:
+        cid=int(sid)
+    except Exception:
+        await c.answer(); return
+    card=CARDS.get(cid)
+    if not card:
+        await c.answer(L(get_lang(c.from_user.id))("card_not_found"), show_alert=True)
+        return
+    if mode=="num":
+        await c.answer(card.get("pan_masked",""), show_alert=True)
+    else:
+        await c.answer(card.get("owner",""), show_alert=True)
+
+
+@cards_router.callback_query(F.data.startswith("carddel:"))
+async def card_delete_cb(c:CallbackQuery):
+    if ADMIN_ID and c.from_user.id!=ADMIN_ID:
+        await c.answer(); return
+    await ensure_month_rollover()
+    try:
+        cid=int(c.data.split(":")[1])
+    except Exception:
+        await c.answer(); return
+    card=CARDS.pop(cid, None)
+    if not card:
+        await c.answer(L(get_lang(c.from_user.id))("card_not_found"), show_alert=True)
+        return
+    save_cards_storage()
+    await c.message.answer(L(get_lang(c.from_user.id))("card_deleted"))
+    await c.answer()
 
 # ====== CATEGORY ======
 def guess_category(text:str)->str:
@@ -819,11 +1880,137 @@ async def set_cmds():
 
 # ====== MAIN ======
 async def main():
+    await ensure_payment_schema()
+    await ensure_cards_table()
+    load_cards_storage()
+    load_debts_archive()
+    load_analysis_state()
+    await ensure_month_rollover()
+    dp.update.middleware(StartGateMiddleware())
+    dp.include_router(reports_range_router)
+    dp.include_router(cards_entry_router)
+    dp.include_router(cards_router)
+    dp.include_router(debts_archive_router)
+    dp.include_router(cards_stub_router)
+    dp.include_router(sub_router)
+    dp.include_router(pay_debug_router)
+    dp.include_router(subscription_router)
     dp.include_router(rt)
     await set_cmds()
+    sample_invoice = create_invoice_id(0)
+    sample_url = build_miniapp_url(WEB_BASE, MONTH_PLAN_PRICE, sample_invoice, RETURN_URL)
+    print("MINI_APP_URL_FOR_BOTFATHER:", MINI_APP_BASE_URL)
+    print("TEST_URL_SAMPLE:", sample_url)
     asyncio.create_task(daily_reminder())
     asyncio.create_task(debt_reminder())
     print("Bot ishga tushdi."); await dp.start_polling(bot)
 
-if __name__=="__main__":
+if __name__ == "__main__":
+    asyncio.run(main())
+@cards_entry_router.message(Command("kartalarim"))
+@cards_entry_router.message(Command("kartam"))
+async def cards_command_entry(message: Message, state: FSMContext):
+    await handle_cards_open(message, state)
+
+
+@cards_entry_router.message(F.text.in_({"💳 Kartalarim", "Kartalarim", "💳 Мои карты"}))
+async def cards_text_entry(message: Message, state: FSMContext):
+    await handle_cards_open(message, state)
+@cards_entry_router.callback_query(F.data == "cards:add")
+async def cards_add_callback(c: CallbackQuery, state: FSMContext):
+    uid = c.from_user.id
+    lang = get_lang(uid)
+    await ensure_month_rollover()
+    await ensure_cards_table()
+    if not is_card_admin(uid):
+        await c.answer(L(lang)("CARDS_ADMIN_ONLY"), show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(CardAddStates.pan)
+    await c.message.answer(L(lang)("CARDS_ASK_PAN"), reply_markup=get_main_menu(lang))
+    await c.answer()
+
+
+@cards_entry_router.message(CardAddStates.pan)
+async def cards_add_pan(message: Message, state: FSMContext):
+    uid = message.from_user.id
+    lang = get_lang(uid)
+    if not is_card_admin(uid):
+        await message.answer(L(lang)("CARDS_ADMIN_ONLY"), reply_markup=get_main_menu(lang))
+        await state.clear()
+        return
+    digits = re.sub(r"\D", "", message.text or "")
+    if len(digits) != 16:
+        await message.answer(L(lang)("CARDS_INVALID_PAN"), reply_markup=get_main_menu(lang))
+        return
+    masked = "**** **** **** " + digits[-4:]
+    await state.update_data(pan_masked=masked)
+    await state.set_state(CardAddStates.expires)
+    await message.answer(L(lang)("CARDS_ASK_EXPIRES"), reply_markup=get_main_menu(lang))
+    return
+
+
+@cards_entry_router.message(CardAddStates.expires)
+async def cards_add_expires(message: Message, state: FSMContext):
+    uid = message.from_user.id
+    lang = get_lang(uid)
+    if not is_card_admin(uid):
+        await message.answer(L(lang)("CARDS_ADMIN_ONLY"), reply_markup=get_main_menu(lang))
+        await state.clear()
+        return
+    text = (message.text or "").strip()
+    if not re.fullmatch(r"(0[1-9]|1[0-2])/\d{2}", text):
+        await message.answer(L(lang)("CARDS_INVALID_EXPIRES"), reply_markup=get_main_menu(lang))
+        return
+    await state.update_data(expires=text)
+    await state.set_state(CardAddStates.owner)
+    await message.answer(L(lang)("CARDS_ASK_OWNER"), reply_markup=get_main_menu(lang))
+    return
+
+
+@cards_entry_router.message(CardAddStates.owner)
+async def cards_add_owner(message: Message, state: FSMContext):
+    uid = message.from_user.id
+    lang = get_lang(uid)
+    if not is_card_admin(uid):
+        await message.answer(L(lang)("CARDS_ADMIN_ONLY"), reply_markup=get_main_menu(lang))
+        await state.clear()
+        return
+    owner = (message.text or "").strip()
+    if not owner:
+        await message.answer(L(lang)("CARDS_ASK_OWNER"), reply_markup=get_main_menu(lang))
+        return
+    await state.update_data(owner_fullname=owner)
+    await state.set_state(CardAddStates.label)
+    await message.answer(L(lang)("CARDS_ASK_LABEL"), reply_markup=get_main_menu(lang))
+    return
+
+
+@cards_entry_router.message(CardAddStates.label)
+async def cards_add_label(message: Message, state: FSMContext):
+    uid = message.from_user.id
+    lang = get_lang(uid)
+    if not is_card_admin(uid):
+        await message.answer(L(lang)("CARDS_ADMIN_ONLY"), reply_markup=get_main_menu(lang))
+        await state.clear()
+        return
+    label = (message.text or "").strip()
+    if not label:
+        await message.answer(L(lang)("CARDS_ASK_LABEL"), reply_markup=get_main_menu(lang))
+        return
+    data = await state.get_data()
+    pan_masked = data.get("pan_masked")
+    expires = data.get("expires")
+    owner = data.get("owner_fullname")
+    if not pan_masked or not expires or not owner:
+        await message.answer(L(lang)("CARDS_INVALID_PAN"), reply_markup=get_main_menu(lang))
+        await state.clear()
+        return
+    await insert_user_card(uid, label, pan_masked, expires, owner)
+    await message.answer(L(lang)("CARDS_ADDED"), reply_markup=get_main_menu(lang))
+    await state.clear()
+    await present_user_cards(message, lang)
+    return
+
+if __name__ == "__main__":
     asyncio.run(main())
