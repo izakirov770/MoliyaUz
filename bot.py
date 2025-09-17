@@ -77,6 +77,7 @@ if _BOT_MODULE_PATH.exists():
 # ====== EXTERNAL MODULES ======
 from bot.keyboards import get_main_menu as _base_main_menu
 from bot.routers.subscription_plans import sub_router, show_subscription_plans
+from bot.middlewares.phone_gate import PhoneGateMiddleware
 from bot.routers.contact_router import contact_router
 from bot.routers.cards_router import cards_router as cards_stub_router
 from bot.routers.pay_debug import pay_debug_router
@@ -85,6 +86,7 @@ from subscription import subscription_router
 # ====== BOT ======
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
+dp.message.middleware(PhoneGateMiddleware())
 rt = Router()
 reports_range_router = Router()
 cards_router = Router()
