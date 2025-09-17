@@ -77,6 +77,7 @@ if _BOT_MODULE_PATH.exists():
 # ====== EXTERNAL MODULES ======
 from bot.keyboards import get_main_menu as _base_main_menu
 from bot.routers.subscription_plans import sub_router, show_subscription_plans
+from bot.routers.contact_router import contact_router
 from bot.routers.cards_router import cards_router as cards_stub_router
 from bot.routers.pay_debug import pay_debug_router
 from subscription import subscription_router
@@ -1887,6 +1888,7 @@ async def main():
     load_analysis_state()
     await ensure_month_rollover()
     dp.update.middleware(StartGateMiddleware())
+    dp.include_router(contact_router)
     dp.include_router(reports_range_router)
     dp.include_router(cards_entry_router)
     dp.include_router(cards_router)
