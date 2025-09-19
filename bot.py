@@ -1807,7 +1807,6 @@ def create_click_link(pid:str, amount:int)->str:
 
 async def send_subscription_invoice_message(uid: int, lang: str, code: str, message: Message) -> None:
     T = L(lang)
-    use_miniapp = False
     if code == "week":
         plan = T("sub_week")
         days = 7
@@ -1816,7 +1815,6 @@ async def send_subscription_invoice_message(uid: int, lang: str, code: str, mess
         plan = T("sub_month")
         days = 30
         price = MONTH_PLAN_PRICE
-        use_miniapp = True
     amount_dec = Decimal(price)
     invoice_id = await payments_create_invoice(uid, amount_dec, "UZS")
     pid = str(invoice_id)
@@ -1834,11 +1832,7 @@ async def send_subscription_invoice_message(uid: int, lang: str, code: str, mess
         "created": now_tk(),
     }
     link = create_click_link(pid, price)
-    if use_miniapp:
-        mini_url = build_miniapp_url(WEB_BASE, price, invoice_id, RETURN_URL)
-        markup = kb_payment_with_miniapp(pid, link, lang, mini_url)
-    else:
-        markup = kb_payment(pid, link, lang)
+    markup = kb_payment(pid, link, lang)
     await message.answer(T("sub_created", plan=plan, amount=price), reply_markup=markup)
 
 
@@ -2129,15 +2123,25 @@ async def cards_collect_owner(message: Message, state: FSMContext):
         return
     data = await state.get_data()
     label = data.get("label", "")
-    pan = data.get("pan", "")
+    pan_raw = data.get("pan", "")
+    pan_display = data.get("pan_display", pan_raw)
     expires = data.get("expires", "")
     if not label or not pan:
         await state.clear()
         await show_cards_overview(message, lang)
         return
-    save_card(uid, label, pan, expires, owner)
+    save_card(uid, label, pan_raw, expires, owner)
     await state.clear()
-    await message.answer(L(lang)("cards_saved"), reply_markup=kb_cards_menu(lang))
+    await message.answer(
+        L(lang)(
+            "cards_saved",
+            label=label,
+            pan=pan_display,
+            expires=expires or "—",
+            owner=owner or "—",
+        ),
+        reply_markup=kb_cards_menu(lang),
+    )
     await show_cards_overview(message, lang)
 
 
