@@ -2123,25 +2123,15 @@ async def cards_collect_owner(message: Message, state: FSMContext):
         return
     data = await state.get_data()
     label = data.get("label", "")
-    pan_raw = data.get("pan", "")
-    pan_display = data.get("pan_display", pan_raw)
+    pan_value = data.get("pan", "")
     expires = data.get("expires", "")
-    if not label or not pan:
+    if not label or not pan_value:
         await state.clear()
         await show_cards_overview(message, lang)
         return
-    save_card(uid, label, pan_raw, expires, owner)
+    save_card(uid, label, pan_value, expires, owner)
     await state.clear()
-    await message.answer(
-        L(lang)(
-            "cards_saved",
-            label=label,
-            pan=pan_display,
-            expires=expires or "—",
-            owner=owner or "—",
-        ),
-        reply_markup=kb_cards_menu(lang),
-    )
+    await message.answer(L(lang)("cards_saved"), reply_markup=kb_cards_menu(lang))
     await show_cards_overview(message, lang)
 
 
