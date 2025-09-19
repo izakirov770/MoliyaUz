@@ -186,10 +186,11 @@ def get_cards(uid: int) -> List[dict]:
 
 
 def save_card(uid: int, label: str, pan: str, expires: str, owner: str) -> None:
+    pan_digits = re.sub(r"\s+", "", pan)
     cards = USER_CARDS.setdefault(uid, [])
     cards.append({
         "label": label[:32],
-        "pan": pan,
+        "pan": pan_digits,
         "expires": expires[:10],
         "owner": owner[:64],
     })
@@ -2098,7 +2099,7 @@ async def cards_collect_pan(message: Message, state: FSMContext):
         await message.answer(L(lang)("cards_format_error"), reply_markup=kb_card_cancel(lang))
         return
     formatted = " ".join(digits[i:i+4] for i in range(0, len(digits), 4))
-    await state.update_data(pan=formatted, pan_raw=digits)
+    await state.update_data(pan=digits, pan_display=formatted)
     await state.set_state(CardAddStates.expires)
     await message.answer(L(lang)("cards_prompt_expires"), reply_markup=kb_card_cancel(lang))
 
