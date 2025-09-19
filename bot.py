@@ -1859,8 +1859,6 @@ async def process_paycheck(uid: int, lang: str, answer_call, reply_markup, pay: 
     record = await payments_get_latest_payment(uid)
     if not record:
         await answer_call(T("pay_status_missing"), reply_markup=reply_markup)
-        await answer_call(T("sub_create_first"), reply_markup=reply_markup)
-        await answer_call(T("SUB_MISSING"), reply_markup=reply_markup)
         return False
     status = (record.get("status") or "").lower()
     amount_dec = Decimal(str(record.get("amount", "0")))
@@ -1879,8 +1877,6 @@ async def process_paycheck(uid: int, lang: str, answer_call, reply_markup, pay: 
         period_days = (pay.get("period_days") if pay else 0) or 30
     if status != "paid":
         await answer_call(T("pay_status_pending"), reply_markup=reply_markup)
-        await answer_call(T("sub_pending_wait"), reply_markup=reply_markup)
-        await answer_call(T("SUB_PENDING"), reply_markup=reply_markup)
         return False
     paid_iso = record.get("paid_at")
     try:
