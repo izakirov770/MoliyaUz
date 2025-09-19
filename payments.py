@@ -91,6 +91,7 @@ async def log_callback(event_type: str, payload: Dict[str, Any], verified: bool=
 async def get_payment_by_invoice(invoice_id: str) -> Optional[Dict[str, Any]]:
     await ensure_schema()
     async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
         cur = await db.execute(
             "SELECT * FROM payments WHERE invoice_id=?", (invoice_id,)
         )
@@ -103,6 +104,7 @@ async def get_payment_by_invoice(invoice_id: str) -> Optional[Dict[str, Any]]:
 async def get_latest_payment(user_id: int) -> Optional[Dict[str, Any]]:
     await ensure_schema()
     async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
         cur = await db.execute(
             "SELECT * FROM payments WHERE user_id=? AND status IN ('pending','paid') "
             "ORDER BY datetime(created_at) DESC LIMIT 1",
@@ -117,6 +119,7 @@ async def get_latest_payment(user_id: int) -> Optional[Dict[str, Any]]:
 async def mark_payment_paid(invoice_id: str) -> Optional[Dict[str, Any]]:
     await ensure_schema()
     async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
         cur = await db.execute(
             "SELECT * FROM payments WHERE invoice_id=?",
             (invoice_id,),
