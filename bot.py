@@ -621,7 +621,7 @@ def t_uz(k,**kw):
         "sub_choose":"Obuna turini tanlang:",
         "sub_week":"1 haftalik obuna — 7 900 so‘m",
         "sub_month":"1 oylik obuna — 19 900 so‘m",
-        "sub_created":"To‘lov yaratildi.\n\nReja: <b>{plan}</b>\nSumma: <b>{amount} so‘m</b>\n\n⬇️ CLICK orqali to‘lang, so‘ng <b>“To‘lovni tekshirish”</b> tugmasini bosing.",
+        "sub_created":"To‘lov yaratildi.\n\nReja: <b>{plan}</b>\nSumma: <b>{amount} so‘m</b>\n\n⬇️ CLICK orqali to‘lang, so‘ng menyudagi <b>“To‘lovni tekshirish”</b> tugmasini bosing.",
         "sub_activated":"✅ Obuna faollashtirildi: {plan} (gacha {until})",
         "pay_click":"CLICK orqali to‘lash","pay_check":"To‘lovni tekshirish",
         "pay_checking":"🔄 To‘lov holati tekshirilmoqda…","pay_notfound":"To‘lov topilmadi yoki tasdiqlanmagan.",
@@ -764,7 +764,7 @@ def t_ru(k, **kw):
         "sub_choose": "Выберите тип подписки:",
         "sub_week": "Подписка на 1 неделю — 7 900 сум",
         "sub_month": "Подписка на 1 месяц — 19 900 сум",
-        "sub_created": "Платеж создан.\n\nТариф: <b>{plan}</b>\nСумма: <b>{amount} сум</b>\n\n⬇️ Оплатите через CLICK, затем нажмите <b>«Проверить платеж»</b>.",
+        "sub_created": "Платеж создан.\n\nТариф: <b>{plan}</b>\nСумма: <b>{amount} сум</b>\n\n⬇️ Оплатите через CLICK, затем в меню нажмите <b>«Проверить платеж»</b>.",
         "sub_activated": "✅ Подписка активирована: {plan} (до {until})",
         "pay_click": "Оплатить в CLICK", "pay_check": "Проверить платеж",
         "pay_checking": "🔄 Проверяем статус платежа…", "pay_notfound": "Платеж не найден или не подтвержден.",
@@ -1013,8 +1013,7 @@ def kb_sub(lang="uz"):
 def kb_payment(pid, pay_url, lang="uz"):
     T=L(lang)
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=T("pay_click"), url=pay_url)],
-        [InlineKeyboardButton(text=T("pay_check"), callback_data=f"paycheck:{pid}")]
+        [InlineKeyboardButton(text=T("pay_click"), url=pay_url)]
     ])
 
 
@@ -1022,8 +1021,7 @@ def kb_payment_with_miniapp(pid: str, pay_url: str, lang: str, mini_url: str) ->
     T = L(lang)
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💳 CLICK (Mini App)", web_app=WebAppInfo(url=mini_url))],
-        [InlineKeyboardButton(text=T("pay_click"), url=pay_url)],
-        [InlineKeyboardButton(text=T("pay_check"), callback_data=f"paycheck:{pid}")]
+        [InlineKeyboardButton(text=T("pay_click"), url=pay_url)]
     ])
 
 
