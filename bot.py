@@ -122,6 +122,8 @@ USERS_PROFILE_CACHE: Dict[int, Dict[str, Any]] = {}
 class CardAddStates(StatesGroup):
     label = State()
     pan = State()
+    expires = State()
+    owner = State()
 
 
 def _load_json(path: Path) -> dict:
@@ -159,10 +161,17 @@ def load_cards_storage() -> None:
             if not isinstance(item, dict):
                 continue
             label = str(item.get("label", "")).strip()
-            pan = str(item.get("pan_last4", "")).strip()
+            pan = str(item.get("pan") or item.get("pan_masked") or item.get("pan_last4") or "").strip()
+            expires = str(item.get("expires", "")).strip()
+            owner = str(item.get("owner") or item.get("owner_fullname") or "").strip()
             if not label or not pan:
                 continue
-            clean.append({"label": label[:32], "pan_last4": pan[-4:]})
+            clean.append({
+                "label": label[:32],
+                "pan": pan,
+                "expires": expires[:10],
+                "owner": owner[:64],
+            })
         if clean:
             USER_CARDS[uid] = clean
 
@@ -176,9 +185,14 @@ def get_cards(uid: int) -> List[dict]:
     return list(USER_CARDS.get(uid, []))
 
 
-def save_card(uid: int, label: str, pan_last4: str) -> None:
+def save_card(uid: int, label: str, pan: str, expires: str, owner: str) -> None:
     cards = USER_CARDS.setdefault(uid, [])
-    cards.append({"label": label[:32], "pan_last4": pan_last4[-4:]})
+    cards.append({
+        "label": label[:32],
+        "pan": pan,
+        "expires": expires[:10],
+        "owner": owner[:64],
+    })
     save_cards_storage()
 
 
@@ -570,8 +584,10 @@ def t_uz(k,**kw):
         "CARDS_ADMIN_ONLY":"Bu amal faqat admin uchun.",
         "cards_menu_title":"Sizning kartalaringiz:",
         "cards_menu_empty":"Karta ro‘yxati hozircha mavjud emas.",
-        "cards_prompt_label":"Karta nomini kiriting (masalan: ‘Asosiy’). Bekor qilish uchun ‘{back}’ deb yozing.",
-        "cards_prompt_pan":"Karta raqamini kiriting (faqat raqamlar). Bekor qilish uchun ‘{back}’ deb yozing.",
+        "cards_prompt_label":"Karta nomini kiriting (masalan: ‘Asosiy’).",
+        "cards_prompt_pan":"Karta raqamini kiriting (faqat raqamlar).",
+        "cards_prompt_expires":"Amal qilish muddatini kiriting (MM/YY).",
+        "cards_prompt_owner":"Karta egasining ism va familiyasini kiriting.",
         "cards_format_error":"❗ Noto‘g‘ri format. Qayta urinib ko‘ring.",
         "cards_saved":"✅ Karta saqlandi.",
         "SUB_OK":"1 oylik obuna faollashdi ✅",
@@ -711,8 +727,10 @@ def t_ru(k, **kw):
         "CARDS_ADMIN_ONLY": "Эта операция только для админа.",
         "cards_menu_title": "Ваши карты:",
         "cards_menu_empty": "Список карт пока пуст.",
-        "cards_prompt_label": "Введите название карты (например: «Основная»). Для отмены напишите «{back}».",
-        "cards_prompt_pan": "Введите номер карты (только цифры). Для отмены напишите «{back}».",
+        "cards_prompt_label": "Введите название карты (например: «Основная»).",
+        "cards_prompt_pan": "Введите номер карты (только цифры).",
+        "cards_prompt_expires": "Введите срок действия (MM/YY).",
+        "cards_prompt_owner": "Введите имя и фамилию владельца карты.",
         "cards_format_error": "❗ Неверный формат. Попробуйте снова.",
         "cards_saved": "✅ Карта сохранена.",
         "SUB_OK": "1-месячная подписка активирована ✅",
@@ -853,9 +871,18 @@ def kb_card_cancel(lang: str = "uz") -> ReplyKeyboardMarkup:
     )
 
 
-CARD_MENU_TEXTS = {"💳 Kartalarim", "Kartalarim", "💳 Мои карты"}
-CARD_ADD_TEXTS = {"➕ Karta qo‘shish", "➕ Добавить карту"}
+CARD_MENU_TEXTS = {"💳 Kartalarim", "Kartalarim", "💳 Мои карты", "Мои карты"}
+CARD_ADD_TEXTS = {"➕ Karta qo‘shish", "➕ Добавить карту", "Добавить карту"}
 CARD_CANCEL_TEXTS = {"ortga", "назад"}
+
+
+def _format_pan_display(pan: str) -> str:
+    if not pan:
+        return "----"
+    digits = re.sub(r"\D", "", pan)
+    if 13 <= len(digits) <= 19:
+        return " ".join(digits[i:i+4] for i in range(0, len(digits), 4))
+    return pan
 
 
 async def show_cards_overview(message: Message, lang: str) -> None:
@@ -868,8 +895,11 @@ async def show_cards_overview(message: Message, lang: str) -> None:
     lines = [T("cards_menu_title")]
     for card in cards:
         label = (card.get("label") or "—").strip() or "—"
-        last4 = (card.get("pan_last4") or "----")[-4:]
-        lines.append(f"{label} — ****{last4}")
+        pan_value = card.get("pan") or card.get("pan_last4") or ""
+        pan_display = _format_pan_display(pan_value)
+        expires = (card.get("expires") or "—").strip() or "—"
+        owner = (card.get("owner") or "—").strip() or "—"
+        lines.append(f"{label} — {pan_display} — {expires} — {owner}")
     await message.answer("\n".join(lines), reply_markup=kb_cards_menu(lang))
 
 
@@ -2026,8 +2056,15 @@ async def cards_text_entry(message: Message, state: FSMContext):
 async def cards_start_add(message: Message, state: FSMContext):
     uid = message.from_user.id
     lang = get_lang(uid)
+    await ensure_month_rollover()
+    await ensure_subscription_state(uid)
+    if not has_access(uid):
+        await send_expired_notice(uid, lang, message.answer)
+        await message.answer(block_text(uid), reply_markup=get_main_menu(lang))
+        return
+    await state.clear()
     await state.set_state(CardAddStates.label)
-    await message.answer(L(lang)("cards_prompt_label", back=L(lang)("btn_back")), reply_markup=kb_card_cancel(lang))
+    await message.answer(L(lang)("cards_prompt_label"), reply_markup=kb_card_cancel(lang))
 
 
 @cards_entry_router.message(CardAddStates.label)
@@ -2044,7 +2081,7 @@ async def cards_collect_label(message: Message, state: FSMContext):
         return
     await state.update_data(label=text)
     await state.set_state(CardAddStates.pan)
-    await message.answer(L(lang)("cards_prompt_pan", back=L(lang)("btn_back")), reply_markup=kb_card_cancel(lang))
+    await message.answer(L(lang)("cards_prompt_pan"), reply_markup=kb_card_cancel(lang))
 
 
 @cards_entry_router.message(CardAddStates.pan)
@@ -2060,13 +2097,50 @@ async def cards_collect_pan(message: Message, state: FSMContext):
     if not digits.isdigit() or not (13 <= len(digits) <= 19):
         await message.answer(L(lang)("cards_format_error"), reply_markup=kb_card_cancel(lang))
         return
-    data = await state.get_data()
-    label = data.get("label")
-    if not label:
+    formatted = " ".join(digits[i:i+4] for i in range(0, len(digits), 4))
+    await state.update_data(pan=formatted, pan_raw=digits)
+    await state.set_state(CardAddStates.expires)
+    await message.answer(L(lang)("cards_prompt_expires"), reply_markup=kb_card_cancel(lang))
+
+
+@cards_entry_router.message(CardAddStates.expires)
+async def cards_collect_expires(message: Message, state: FSMContext):
+    uid = message.from_user.id
+    lang = get_lang(uid)
+    text = (message.text or "").strip()
+    if _is_cancel(text, lang):
         await state.clear()
         await show_cards_overview(message, lang)
         return
-    save_card(uid, label, digits[-4:])
+    if not re.fullmatch(r"(0[1-9]|1[0-2])/\d{2}", text):
+        await message.answer(L(lang)("cards_format_error"), reply_markup=kb_card_cancel(lang))
+        return
+    await state.update_data(expires=text)
+    await state.set_state(CardAddStates.owner)
+    await message.answer(L(lang)("cards_prompt_owner"), reply_markup=kb_card_cancel(lang))
+
+
+@cards_entry_router.message(CardAddStates.owner)
+async def cards_collect_owner(message: Message, state: FSMContext):
+    uid = message.from_user.id
+    lang = get_lang(uid)
+    owner = (message.text or "").strip()
+    if _is_cancel(owner, lang):
+        await state.clear()
+        await show_cards_overview(message, lang)
+        return
+    if not owner:
+        await message.answer(L(lang)("cards_format_error"), reply_markup=kb_card_cancel(lang))
+        return
+    data = await state.get_data()
+    label = data.get("label", "")
+    pan = data.get("pan", "")
+    expires = data.get("expires", "")
+    if not label or not pan:
+        await state.clear()
+        await show_cards_overview(message, lang)
+        return
+    save_card(uid, label, pan, expires, owner)
     await state.clear()
     await message.answer(L(lang)("cards_saved"), reply_markup=kb_cards_menu(lang))
     await show_cards_overview(message, lang)
