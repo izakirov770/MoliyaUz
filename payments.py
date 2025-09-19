@@ -1,4 +1,5 @@
 import json
+import os
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -7,7 +8,9 @@ from typing import Any, Dict, Optional, Tuple
 
 import aiosqlite
 
-DB_PATH = "moliya.db"
+from db import DB_PATH as DEFAULT_DB_PATH
+
+DB_PATH = os.getenv("DB_PATH", DEFAULT_DB_PATH)
 
 PAYMENTS_TABLE = """
 CREATE TABLE IF NOT EXISTS payments(

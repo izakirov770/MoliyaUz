@@ -1,6 +1,7 @@
 import os
 import sqlite3
-from typing import Any, Awaitable, Callable, Dict
+import sys
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 from aiogram import BaseMiddleware
 from aiogram.types import Message
@@ -34,6 +35,16 @@ def _user_has_phone(user_id: int) -> bool:
     return bool(row and row[0])
 
 
+def _current_step(user_id: int) -> Optional[str]:
+    bot_module = sys.modules.get("bot")
+    if not bot_module:
+        return None
+    step_store = getattr(bot_module, "STEP", None)
+    if isinstance(step_store, dict):
+        return step_store.get(user_id)
+    return None
+
+
 class PhoneGateMiddleware(BaseMiddleware):
     async def __call__(
         self,
@@ -62,6 +73,10 @@ class PhoneGateMiddleware(BaseMiddleware):
                     await state.clear()
                 except Exception:
                     pass
+            return await handler(event, data)
+
+        step = _current_step(user_id)
+        if step and step != "need_phone":
             return await handler(event, data)
 
         if text in WHITELIST_TEXTS or text.lower().startswith("/start"):

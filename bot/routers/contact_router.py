@@ -2,10 +2,11 @@ import datetime
 import os
 import re
 import sqlite3
+import sys
 from typing import Optional
 
 from aiogram import F, Router
-from aiogram.types import Message
+from aiogram.types import Message, ReplyKeyboardRemove
 
 from bot.keyboards import get_main_menu
 
@@ -60,20 +61,51 @@ def _is_phone_text(text: str) -> bool:
     return _clean_phone_text(text) is not None
 
 
-async def _finish_ok(message: Message, state: Optional["FSMContext"]) -> None:
+def _resolve_bot_context() -> dict:
+    bot_module = sys.modules.get("bot") or sys.modules.get("__main__")
+    if not bot_module:
+        return {}
+    return {
+        "STEP": getattr(bot_module, "STEP", None),
+        "get_lang": getattr(bot_module, "get_lang", None),
+        "L": getattr(bot_module, "L", None),
+        "menu": getattr(bot_module, "get_main_menu", None),
+    }
+
+
+async def _finish_ok(message: Message, state: Optional["FSMContext"]) -> None: # type: ignore
     if state and hasattr(state, "clear"):
         try:
             await state.clear()
-        except Exception:
+        except Exception:  # pragma: no cover
             pass
+
+    ctx = _resolve_bot_context()
+    step_store = ctx.get("STEP")
+    get_lang = ctx.get("get_lang")
+    lang = get_lang(message.from_user.id) if callable(get_lang) else "uz"
+    keyboard_factory = ctx.get("menu")
+    menu_markup = keyboard_factory(lang) if callable(keyboard_factory) else get_main_menu()
+
+    if isinstance(step_store, dict):
+        step_store[message.from_user.id] = "main"
+
+    translator_factory = ctx.get("L")
+    if callable(translator_factory):
+        translator = translator_factory(lang)
+        menu_text = translator("menu")
+    else:
+        menu_text = "Asosiy menyu:"
+
     await message.answer(
         "📱 Raqamingiz qabul qilindi. Menyudan davom eting.",
-        reply_markup=get_main_menu(),
+        reply_markup=ReplyKeyboardRemove(),
     )
+    await message.answer(menu_text, reply_markup=menu_markup)
 
 
 @contact_router.message(F.contact)
-async def on_contact(msg: Message, state: Optional["FSMContext"] = None):
+async def on_contact(msg: Message, state: Optional["FSMContext"] = None): # type: ignore
     contact = msg.contact
     if not contact or not getattr(contact, "phone_number", None):
         await msg.answer(
@@ -95,7 +127,7 @@ async def on_contact(msg: Message, state: Optional["FSMContext"] = None):
 
 
 @contact_router.message(F.text.func(_is_phone_text))
-async def on_phone_text(msg: Message, state: Optional["FSMContext"] = None):
+async def on_phone_text(msg: Message, state: Optional["FSMContext"] = None): # type: ignore
     phone = _clean_phone_text(msg.text)
     if not phone:
         return  # Guard, though predicate should filter mismatches

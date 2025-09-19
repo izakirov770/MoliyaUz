@@ -1,6 +1,8 @@
+import os
+
 import aiosqlite
 
-DB_PATH = "moliya.db"
+DB_PATH = os.getenv("DB_PATH", "moliya.db")
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;

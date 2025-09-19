@@ -1,5 +1,5 @@
 # bot.py
-import asyncio, os, uuid, re, json, logging, sys, types
+import asyncio, os, re, json, logging, sys, types
 import aiosqlite
 from decimal import Decimal
 from pathlib import Path
@@ -75,21 +75,15 @@ if _BOT_MODULE_PATH.exists():
         _existing_bot.__path__ = [str(_BOT_MODULE_PATH)]
 
 # ====== EXTERNAL MODULES ======
-from bot.keyboards import get_main_menu as _base_main_menu
-from bot.routers.subscription_plans import sub_router, show_subscription_plans
-from bot.middlewares.phone_gate import PhoneGateMiddleware
-from bot.routers.contact_router import contact_router
-from bot.routers.cards_router import cards_router as cards_stub_router
+from bot.routers.subscription_plans import sub_router
 from bot.routers.pay_debug import pay_debug_router
 from subscription import subscription_router
 
 # ====== BOT ======
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
-dp.message.middleware(PhoneGateMiddleware())
 rt = Router()
 reports_range_router = Router()
-cards_router = Router()
 cards_entry_router = Router()
 debts_archive_router = Router()
 
@@ -115,20 +109,19 @@ ANALYSIS_COUNTERS: Dict[int, Dict[str, int]] = {}
 LAST_RESET_YYYYMM: Optional[str] = None
 ANALYSIS_STATE_PATH = Path("analysis_state.json")
 
-CARDS: Dict[int, Dict[str, Any]] = {}
 CARDS_FILE = Path("cards.json")
-CARDS_SEQ = 0
-CARD_ADD_STATE: Dict[int, Dict[str, Any]] = {}
+USER_CARDS: Dict[int, List[dict]] = {}
 
 DEBTS_ARCHIVE: Dict[int, List[dict]] = {}
 DEBTS_ARCHIVE_FILE = Path("debts_archive.json")
 
+USERS_PROFILE_FILE = Path("users.json")
+USERS_PROFILE_CACHE: Dict[int, Dict[str, Any]] = {}
+
 
 class CardAddStates(StatesGroup):
-    pan = State()
-    expires = State()
-    owner = State()
     label = State()
+    pan = State()
 
 
 def _load_json(path: Path) -> dict:
@@ -149,140 +142,102 @@ def _save_json(path: Path, payload: dict) -> None:
     except Exception:
         pass
 
-CARDS_SQL = """
-CREATE TABLE IF NOT EXISTS cards(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    label TEXT,
-    pan_masked TEXT,
-    expires TEXT,
-    owner_fullname TEXT,
-    created_by BIGINT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-"""
-
-CARDS_TABLE_READY = False
-
-
-async def ensure_cards_table() -> None:
-    global CARDS_TABLE_READY
-    if CARDS_TABLE_READY:
+def load_cards_storage() -> None:
+    USER_CARDS.clear()
+    data = _load_json(CARDS_FILE)
+    if not isinstance(data, dict):
         return
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(CARDS_SQL)
-        await _ensure_card_column(db, "expires", "TEXT")
-        await _ensure_card_column(db, "owner_fullname", "TEXT")
-        await _ensure_card_column(db, "created_by", "BIGINT")
-        await db.commit()
-    CARDS_TABLE_READY = True
+    for key, items in data.items():
+        try:
+            uid = int(key)
+        except Exception:
+            continue
+        if not isinstance(items, list):
+            continue
+        clean = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label", "")).strip()
+            pan = str(item.get("pan_last4", "")).strip()
+            if not label or not pan:
+                continue
+            clean.append({"label": label[:32], "pan_last4": pan[-4:]})
+        if clean:
+            USER_CARDS[uid] = clean
 
 
-async def _ensure_card_column(db, column: str, ddl: str) -> None:
+def save_cards_storage() -> None:
+    payload = {str(uid): cards for uid, cards in USER_CARDS.items()}
+    _save_json(CARDS_FILE, payload)
+
+
+def get_cards(uid: int) -> List[dict]:
+    return list(USER_CARDS.get(uid, []))
+
+
+def save_card(uid: int, label: str, pan_last4: str) -> None:
+    cards = USER_CARDS.setdefault(uid, [])
+    cards.append({"label": label[:32], "pan_last4": pan_last4[-4:]})
+    save_cards_storage()
+
+
+def load_users_storage() -> None:
+    global USERS_PROFILE_CACHE
+    if not USERS_PROFILE_FILE.exists():
+        USERS_PROFILE_CACHE = {}
+        return
     try:
-        cur = await db.execute("PRAGMA table_info(cards)")
-        cols = [row[1] for row in await cur.fetchall()]
-        if column not in cols:
-            await db.execute(f"ALTER TABLE cards ADD COLUMN {column} {ddl}")
+        raw = USERS_PROFILE_FILE.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except Exception:
+        USERS_PROFILE_CACHE = {}
+        return
+    if not isinstance(data, dict):
+        USERS_PROFILE_CACHE = {}
+        return
+    cache: Dict[int, Dict[str, Any]] = {}
+    for key, value in data.items():
+        if not isinstance(value, dict):
+            continue
+        try:
+            uid = int(key)
+        except Exception:
+            continue
+        cache[uid] = value
+    USERS_PROFILE_CACHE = cache
+
+
+def save_users_storage() -> None:
+    try:
+        USERS_PROFILE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        dump = {str(uid): data for uid, data in USERS_PROFILE_CACHE.items()}
+        USERS_PROFILE_FILE.write_text(
+            json.dumps(dump, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     except Exception:
         pass
 
 
-async def fetch_user_cards(uid: int) -> List[Dict[str, Any]]:
-    await ensure_cards_table()
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        cur = await db.execute(
-            "SELECT label, pan_masked, expires, owner_fullname FROM cards WHERE created_by=? ORDER BY datetime(created_at) DESC",
-            (uid,),
-        )
-        rows = await cur.fetchall()
-    return [dict(row) for row in rows]
-
-
-async def insert_user_card(uid: int, label: str, pan_masked: str, expires: str, owner_fullname: str) -> None:
-    await ensure_cards_table()
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO cards(label, pan_masked, expires, owner_fullname, created_by) VALUES(?,?,?,?,?)",
-            (label, pan_masked, expires, owner_fullname, uid),
-        )
-        await db.commit()
-
-
-async def present_user_cards(message: Message, lang: str) -> None:
-    uid = message.from_user.id
-    T = L(lang)
-    cards = await fetch_user_cards(uid)
-    if not cards:
-        await message.answer(T("CARDS_EMPTY"), reply_markup=cards_add_inline(lang))
-        await message.answer(T("menu"), reply_markup=get_main_menu(lang))
+def update_user_profile(user_id: int, **fields: Any) -> None:
+    if not fields:
         return
-    lines = [T("CARDS_TITLE")]
-    for card in cards:
-        label = card.get("label") or "—"
-        pan = card.get("pan_masked") or "—"
-        expires = card.get("expires") or "—"
-        owner = card.get("owner_fullname") or "—"
-        lines.append(f"• {label} — {pan} — {expires} — {owner}")
-    await message.answer("\n".join(lines), reply_markup=cards_add_inline(lang))
-    await message.answer(T("menu"), reply_markup=get_main_menu(lang))
-
-
-async def handle_cards_open(message: Message, state: FSMContext) -> None:
-    uid = message.from_user.id
-    lang = get_lang(uid)
-    await ensure_month_rollover()
-    await ensure_subscription_state(uid)
-    if not has_access(uid):
-        await send_expired_notice(uid, lang, message.answer)
-        await message.answer(block_text(uid), reply_markup=get_main_menu(lang))
-        return
-    await ensure_cards_table()
-    await state.clear()
-    await present_user_cards(message, lang)
-    return
-def load_cards_storage() -> None:
-    global CARDS_SEQ
-    data = _load_json(CARDS_FILE)
-    cards = data.get("cards") if isinstance(data, dict) else None
-    seq = data.get("seq") if isinstance(data, dict) else None
-    if isinstance(cards, list):
-        for it in cards:
-            if isinstance(it, dict) and "id" in it:
-                try:
-                    cid = int(it["id"])
-                except Exception:
-                    continue
-                card = {
-                    "id": cid,
-                    "label": it.get("label", ""),
-                    "pan_masked": it.get("pan_masked", ""),
-                    "owner": it.get("owner", ""),
-                    "is_default": bool(it.get("is_default")),
-                    "created_at": it.get("created_at", "")
-                }
-                raw_default = it.get("is_default")
-                if isinstance(raw_default, str):
-                    card["is_default"] = raw_default.lower() in ("1","true","ha","yes")
-                elif isinstance(raw_default, (int, bool)):
-                    card["is_default"] = bool(raw_default)
-                CARDS[cid] = card
-    if isinstance(seq, int):
-        CARDS_SEQ = seq
-
-
-def save_cards_storage() -> None:
-    payload = {
-        "seq": CARDS_SEQ,
-        "cards": list(CARDS.values()),
-    }
-    _save_json(CARDS_FILE, payload)
-
-
-def next_card_id() -> int:
-    global CARDS_SEQ
-    CARDS_SEQ += 1
-    return CARDS_SEQ
+    profile = USERS_PROFILE_CACHE.setdefault(user_id, {})
+    changed = False
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if "created_at" not in profile:
+        profile["created_at"] = now_iso
+        changed = True
+    for key, value in fields.items():
+        if value is None:
+            continue
+        if profile.get(key) != value:
+            profile[key] = value
+            changed = True
+    if changed:
+        profile["updated_at"] = now_iso
+        save_users_storage()
 
 
 def load_debts_archive() -> None:
@@ -410,6 +365,37 @@ PENDING_PAYMENTS: Dict[str,dict] = {}
 
 DEBT_REMIND_SENT: set[Tuple[int,int,str]] = set()
 
+NAV_STACK: Dict[int, List[str]] = {}
+
+
+def nav_stack(uid: int) -> List[str]:
+    stack = NAV_STACK.setdefault(uid, ["main"])
+    if not stack:
+        stack.append("main")
+    return stack
+
+
+def nav_current(uid: int) -> str:
+    return nav_stack(uid)[-1]
+
+
+def nav_push(uid: int, state: str) -> None:
+    stack = nav_stack(uid)
+    if stack[-1] != state:
+        stack.append(state)
+
+
+def nav_back(uid: int) -> str:
+    stack = nav_stack(uid)
+    if len(stack) > 1:
+        stack.pop()
+    return stack[-1]
+
+
+def nav_reset(uid: int) -> None:
+    NAV_STACK[uid] = ["main"]
+
+
 # ====== UTIL ======
 def is_active(uid:int)->bool:
     e=SUB_EXPIRES.get(uid)
@@ -527,9 +513,10 @@ def t_uz(k,**kw):
         "menu":"Asosiy menyu:",
         "btn_hisobla":"🧮 Hisobla",
         "btn_hisobot":"📊 Hisobot",
-        "btn_qarz":"💳 Qarz",
+        "btn_qarz":"🚨 Qarz",
         "btn_balance":"💼 Balans",
         "btn_obuna":"⭐️ Obuna",
+        "btn_back":"⬅️ Ortga",
         "btn_analiz":"📊 Analiz",
         "btn_lang":"🌐 Tilni o‘zgartirish",
 
@@ -581,6 +568,12 @@ def t_uz(k,**kw):
         "CARDS_ASK_LABEL":"Karta nomi (masalan: Uzcard Ofis)",
         "CARDS_ADDED":"Karta saqlandi ✅",
         "CARDS_ADMIN_ONLY":"Bu amal faqat admin uchun.",
+        "cards_menu_title":"Sizning kartalaringiz:",
+        "cards_menu_empty":"Karta ro‘yxati hozircha mavjud emas.",
+        "cards_prompt_label":"Karta nomini kiriting (masalan: ‘Asosiy’). Bekor qilish uchun ‘{back}’ deb yozing.",
+        "cards_prompt_pan":"Karta raqamini kiriting (faqat raqamlar). Bekor qilish uchun ‘{back}’ deb yozing.",
+        "cards_format_error":"❗ Noto‘g‘ri format. Qayta urinib ko‘ring.",
+        "cards_saved":"✅ Karta saqlandi.",
         "SUB_OK":"1 oylik obuna faollashdi ✅",
         "SUB_PENDING":"To‘lov hali tasdiqlanmagan.",
         "SUB_MISSING":"Avval to‘lov yarating.",
@@ -658,9 +651,10 @@ def t_ru(k, **kw):
         "menu": "Главное меню:",
         "btn_hisobla": "🧮 Посчитать",
         "btn_hisobot": "📊 Отчет",
-        "btn_qarz": "💳 Долг",
+        "btn_qarz": "🚨 Долг",
         "btn_balance": "💼 Баланс",
         "btn_obuna": "⭐️ Подписка",
+        "btn_back": "⬅️ Назад",
         "btn_analiz": "📊 Анализ",
         "btn_lang": "🌐 Сменить язык",
 
@@ -715,6 +709,12 @@ def t_ru(k, **kw):
         "CARDS_ASK_LABEL": "Название карты (например: Uzcard Офис)",
         "CARDS_ADDED": "Карта сохранена ✅",
         "CARDS_ADMIN_ONLY": "Эта операция только для админа.",
+        "cards_menu_title": "Ваши карты:",
+        "cards_menu_empty": "Список карт пока пуст.",
+        "cards_prompt_label": "Введите название карты (например: «Основная»). Для отмены напишите «{back}».",
+        "cards_prompt_pan": "Введите номер карты (только цифры). Для отмены напишите «{back}».",
+        "cards_format_error": "❗ Неверный формат. Попробуйте снова.",
+        "cards_saved": "✅ Карта сохранена.",
         "SUB_OK": "1-месячная подписка активирована ✅",
         "SUB_PENDING": "Платеж ещё не подтвержден.",
         "SUB_MISSING": "Сначала создайте платеж.",
@@ -796,14 +796,21 @@ logger = logging.getLogger(__name__)
 
 
 def get_main_menu(lang: str = "uz") -> ReplyKeyboardMarkup:
-    menu = _base_main_menu()
     T = L(lang)
-    menu.row(KeyboardButton(text=T("btn_hisobla")))
-    menu.row(KeyboardButton(text=T("btn_hisobot")), KeyboardButton(text=T("btn_qarz")))
-    menu.row(KeyboardButton(text=T("btn_balance")))
-    menu.row(KeyboardButton(text=T("btn_obuna")))
-    menu.row(KeyboardButton(text=T("btn_analiz")), KeyboardButton(text=T("btn_cards")))
-    menu.row(KeyboardButton(text=T("btn_lang")))
+    keyboard = [
+        [KeyboardButton(text=T("btn_hisobla"))],
+        [KeyboardButton(text=T("btn_hisobot")), KeyboardButton(text=T("btn_qarz"))],
+        [KeyboardButton(text=T("btn_balance")), KeyboardButton(text=T("btn_obuna"))],
+        [KeyboardButton(text=T("btn_analiz")), KeyboardButton(text=T("btn_cards"))],
+        [KeyboardButton(text=T("btn_lang"))],
+    ]
+
+    menu = ReplyKeyboardMarkup(
+        keyboard=keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
     try:
         logger.debug(
             "main_menu_rendered",
@@ -816,18 +823,106 @@ def get_main_menu(lang: str = "uz") -> ReplyKeyboardMarkup:
     return menu
 
 
-def kb_card_add(lang="uz"):
-    T=L(lang)
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=T("card_add_button"), callback_data="cardadd:start")]
-    ])
-
-
-def cards_add_inline(lang: str = "uz") -> InlineKeyboardMarkup:
+def kb_cards_menu(lang: str = "uz") -> ReplyKeyboardMarkup:
     T = L(lang)
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=T("CARDS_ADD_BUTTON"), callback_data="cards:add")]
-    ])
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=T("CARDS_ADD_BUTTON"))],
+            [KeyboardButton(text=T("btn_back"))],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
+def kb_input_entry(lang: str = "uz") -> ReplyKeyboardMarkup:
+    T = L(lang)
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=T("btn_back"))]],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
+def kb_card_cancel(lang: str = "uz") -> ReplyKeyboardMarkup:
+    T = L(lang)
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=T("btn_back"))]],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
+CARD_MENU_TEXTS = {"💳 Kartalarim", "Kartalarim", "💳 Мои карты"}
+CARD_ADD_TEXTS = {"➕ Karta qo‘shish", "➕ Добавить карту"}
+CARD_CANCEL_TEXTS = {"ortga", "назад"}
+
+
+async def show_cards_overview(message: Message, lang: str) -> None:
+    uid = message.from_user.id
+    cards = get_cards(uid)
+    T = L(lang)
+    if not cards:
+        await message.answer(T("cards_menu_empty"), reply_markup=kb_cards_menu(lang))
+        return
+    lines = [T("cards_menu_title")]
+    for card in cards:
+        label = (card.get("label") or "—").strip() or "—"
+        last4 = (card.get("pan_last4") or "----")[-4:]
+        lines.append(f"{label} — ****{last4}")
+    await message.answer("\n".join(lines), reply_markup=kb_cards_menu(lang))
+
+
+async def enter_cards_menu(message: Message, state: FSMContext) -> None:
+    uid = message.from_user.id
+    lang = get_lang(uid)
+    await ensure_month_rollover()
+    await ensure_subscription_state(uid)
+    if not has_access(uid):
+        await send_expired_notice(uid, lang, message.answer)
+        await message.answer(block_text(uid), reply_markup=get_main_menu(lang))
+        return
+    await state.clear()
+    nav_push(uid, "cards_menu")
+    await show_cards_overview(message, lang)
+
+
+def _is_cancel(text: Optional[str], lang: str) -> bool:
+    if not text:
+        return False
+    value = text.strip().lower()
+    if value in CARD_CANCEL_TEXTS:
+        return True
+    back = L(lang)("btn_back").strip().lower()
+    return value == back
+
+
+def kb_debt_menu_reply(lang: str = "uz") -> ReplyKeyboardMarkup:
+    T = L(lang)
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=T("debt_mine"))],
+            [KeyboardButton(text=T("debt_given"))],
+            [KeyboardButton(text=T("debt_archive_btn"))],
+            [KeyboardButton(text=T("btn_back"))],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
+def kb_sub_menu_reply(lang: str = "uz") -> ReplyKeyboardMarkup:
+    T = L(lang)
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=T("sub_week"))],
+            [KeyboardButton(text=T("sub_month"))],
+            [KeyboardButton(text=T("pay_check"))],
+            [KeyboardButton(text=T("btn_back"))],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
 
 def kb_oferta(lang="uz"):
     T=L(lang)
@@ -835,21 +930,32 @@ def kb_oferta(lang="uz"):
         [InlineKeyboardButton(text=T("btn_oferta"), url=NOTION_OFER_URL)]
     ])
 
-def kb_rep_main(lang="uz"):
-    T=L(lang)
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=T("rep_tx"),callback_data="rep:tx")],
-        [InlineKeyboardButton(text=T("rep_debts"),callback_data="rep:debts")]
-    ])
+def kb_rep_main(lang: str = "uz") -> ReplyKeyboardMarkup:
+    T = L(lang)
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=T("rep_tx"))],
+            [KeyboardButton(text=T("rep_debts"))],
+            [KeyboardButton(text=T("btn_back"))],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
 
-def kb_rep_range(lang="uz"):
-    T=L(lang)
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=T("rep_day"),callback_data="rep:day")],
-        [InlineKeyboardButton(text=T("rep_week"),callback_data="rep:week")],
-        [InlineKeyboardButton(text=T("rep_month"),callback_data="rep:month")],
-        [InlineKeyboardButton(text=T("rep_range_custom"),callback_data="rep:range")]
-    ])
+
+def kb_rep_range(lang: str = "uz") -> ReplyKeyboardMarkup:
+    T = L(lang)
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=T("rep_day"))],
+            [KeyboardButton(text=T("rep_week"))],
+            [KeyboardButton(text=T("rep_month"))],
+            [KeyboardButton(text=T("rep_range_custom"))],
+            [KeyboardButton(text=T("btn_back"))],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
 
 def kb_debt_menu(lang="uz"):
     T=L(lang)
@@ -888,6 +994,51 @@ def kb_payment_with_miniapp(pid: str, pay_url: str, lang: str, mini_url: str) ->
         [InlineKeyboardButton(text=T("pay_click"), url=pay_url)],
         [InlineKeyboardButton(text=T("pay_check"), callback_data=f"paycheck:{pid}")]
     ])
+
+
+async def show_navigation_state(uid: int, lang: str, state: str, message: Message) -> None:
+    T = L(lang)
+    if state == "main":
+        nav_reset(uid)
+        STEP[uid] = "main"
+        await message.answer(T("menu"), reply_markup=get_main_menu(lang))
+        return
+
+    if state == "report_main":
+        STEP[uid] = "main"
+        await message.answer(T("report_main"), reply_markup=kb_rep_main(lang))
+        return
+
+    if state == "debt_menu":
+        STEP[uid] = "main"
+        await message.answer(T("debt_menu"), reply_markup=kb_debt_menu_reply(lang))
+        return
+
+    if state == "sub_menu":
+        STEP[uid] = "main"
+        await message.answer(T("sub_choose"), reply_markup=kb_sub_menu_reply(lang))
+        return
+
+    if state == "cards_menu":
+        STEP[uid] = "main"
+        await show_cards_overview(message, lang)
+        return
+
+    if state == "input_tx":
+        STEP[uid] = "input_tx"
+        await message.answer(T("enter_tx"), reply_markup=kb_input_entry(lang))
+        return
+
+    STEP[uid] = "main"
+    await message.answer(T("menu"), reply_markup=get_main_menu(lang))
+
+
+async def handle_back_button(m: Message, uid: int, lang: str) -> None:
+    PENDING_DEBT.pop(uid, None)
+    REPORT_RANGE_STATE.pop(uid, None)
+    STEP[uid] = "main"
+    state = nav_back(uid)
+    await show_navigation_state(uid, lang, state, m)
 
 # ====== PARSERLAR ======
 def parse_amount(text:str)->Optional[int]:
@@ -1060,6 +1211,7 @@ async def start(m:Message):
     SEEN_USERS.add(uid)
     TRIAL_START.setdefault(uid, now_tk())
     await ensure_month_rollover()
+    nav_reset(uid)
     STEP[uid]="lang"
     await m.answer(t_uz("start_choose"), reply_markup=kb_lang())
 
@@ -1067,6 +1219,7 @@ async def start(m:Message):
 async def menu_cmd(m: Message):
     uid = m.from_user.id
     await ensure_month_rollover()
+    nav_reset(uid)
     await m.answer((t_uz if get_lang(uid)=="uz" else t_ru)("menu"), reply_markup=get_main_menu(get_lang(uid)))
 
 @rt.message(Command("approve"))
@@ -1119,6 +1272,10 @@ async def on_text(m:Message):
         await ensure_month_rollover()
         await ensure_subscription_state(uid)
 
+        if t == T("btn_back"):
+            await handle_back_button(m, uid, lang)
+            return
+
         if step is None and not USER_ACTIVATED.get(uid):
             USER_ACTIVATED.setdefault(uid, False)
 
@@ -1162,71 +1319,27 @@ async def on_text(m:Message):
             if "uz" in low or "o‘z" in low or "o'z" in low: USER_LANG[uid]="uz"
             elif "рус" in low or "ru" in low: USER_LANG[uid]="ru"
             else: return
+            update_user_profile(uid, lang=get_lang(uid))
             STEP[uid]="name"
             await m.answer((t_uz if get_lang(uid)=="uz" else t_ru)("ask_name"), reply_markup=ReplyKeyboardRemove()); return
 
         if step=="name":
             lang=get_lang(uid); T=L(lang)
+            clean_name = t.strip()
+            if clean_name:
+                update_user_profile(uid, name=clean_name, lang=lang)
             await m.answer(T("welcome"), reply_markup=kb_share(lang))
             await m.answer("—", reply_markup=kb_oferta(lang))
             STEP[uid]="need_phone"; return
 
         if step=="need_phone": return
 
-        if step=="card_add_label":
-            if not t:
-                await m.answer(T("card_add_ask_label")); return
-            draft=CARD_ADD_STATE.setdefault(uid, {})
-            draft["label"] = t
-            STEP[uid]="card_add_number"
-            await m.answer(T("card_add_ask_number")); return
-
-        if step=="card_add_number":
-            digits=re.sub(r"\D", "", t)
-            if len(digits)!=16:
-                await m.answer(T("card_add_invalid_number")); return
-            formatted=" ".join(digits[i:i+4] for i in range(0, len(digits), 4))
-            draft=CARD_ADD_STATE.setdefault(uid, {})
-            draft["pan_masked"] = formatted
-            STEP[uid]="card_add_owner"
-            await m.answer(T("card_add_ask_owner")); return
-
-        if step=="card_add_owner":
-            if not t:
-                await m.answer(T("card_add_ask_owner")); return
-            draft=CARD_ADD_STATE.get(uid)
-            if not draft or "label" not in draft:
-                CARD_ADD_STATE[uid] = {}
-                STEP[uid]="card_add_label"
-                await m.answer(T("card_add_ask_label")); return
-            if "pan_masked" not in draft:
-                STEP[uid]="card_add_number"
-                await m.answer(T("card_add_ask_number")); return
-            label=draft.get("label")
-            pan=draft.get("pan_masked")
-            is_default=not any(it.get("is_default") for it in CARDS.values())
-            card_id=next_card_id()
-            CARDS[card_id]={
-                "id":card_id,
-                "label":label,
-                "pan_masked":pan,
-                "owner":t,
-                "is_default":is_default,
-                "created_at":now_tk().isoformat()
-            }
-            CARD_ADD_STATE.pop(uid, None)
-            save_cards_storage()
-            STEP[uid]="main"
-            await m.answer(T("card_added"))
-            await send_cards_list(uid, m, lang)
-            return
-
         if step in ("debt_mine_due","debt_given_due"):
             due=parse_due_date(t)
             if not due: await m.answer(T("date_need")); return
             tmp=PENDING_DEBT.get(uid)
             if not tmp:
-                STEP[uid]="main"; await m.answer(T("enter_tx"), reply_markup=get_main_menu(lang)); return
+                STEP[uid]="main"; await m.answer(T("enter_tx"), reply_markup=kb_input_entry(lang)); return
 
             did = await save_debt(uid, tmp["direction"], tmp["amount"], tmp["currency"], tmp["who"], due)
 
@@ -1247,26 +1360,31 @@ async def on_text(m:Message):
             if not has_access(uid):
                 await send_expired_notice(uid, lang, m.answer)
                 await m.answer(block_text(uid), reply_markup=kb_sub(lang)); return
-            STEP[uid]="input_tx"; await m.answer(T("enter_tx"), reply_markup=get_main_menu(lang)); return
+            nav_push(uid, "input_tx")
+            STEP[uid]="input_tx"; await m.answer(T("enter_tx"), reply_markup=kb_input_entry(lang)); return
 
         if t==T("btn_hisobot"):
             if not has_access(uid):
                 await send_expired_notice(uid, lang, m.answer)
                 await m.answer(block_text(uid), reply_markup=kb_sub(lang)); return
+            nav_push(uid, "report_main")
             await m.answer(T("report_main"), reply_markup=kb_rep_main(lang)); return
 
         if t==T("btn_qarz"):
             if not has_access(uid):
                 await send_expired_notice(uid, lang, m.answer)
                 await m.answer(block_text(uid), reply_markup=kb_sub(lang)); return
-            await m.answer(T("debt_menu"), reply_markup=kb_debt_menu(lang)); return
+            STEP[uid]="main"
+            nav_push(uid, "debt_menu")
+            await m.answer(T("debt_menu"), reply_markup=kb_debt_menu_reply(lang)); return
 
         if t==T("btn_balance"):
             await send_balance(uid, m); return
 
         if t==T("btn_obuna"):
-            await show_subscription_plans(m)
-            await m.answer(T("sub_choose"), reply_markup=kb_sub(lang)); return
+            STEP[uid]="main"
+            nav_push(uid, "sub_menu")
+            await m.answer(T("sub_choose"), reply_markup=kb_sub_menu_reply(lang)); return
 
         if t==T("btn_analiz"):
             if not has_access(uid):
@@ -1280,10 +1398,54 @@ async def on_text(m:Message):
                 await send_expired_notice(uid, lang, m.answer)
                 await m.answer(block_text(uid), reply_markup=get_main_menu(lang))
                 return
-            await send_cards_list(uid, m, lang); return
+            STEP[uid]="main"
+            nav_push(uid, "cards_menu")
+            await show_cards_overview(m, lang); return
 
         if t==T("btn_lang"):
             STEP[uid]="lang"; await m.answer(T("lang_again"), reply_markup=kb_lang()); return
+
+        if t==T("debt_mine"):
+            if not has_access(uid):
+                await send_expired_notice(uid, lang, m.answer)
+                await m.answer(block_text(uid), reply_markup=kb_sub(lang))
+                return
+            await send_debt_direction(uid, lang, "mine", m.answer, reply_markup=kb_debt_menu_reply(lang))
+            return
+
+        if t==T("debt_given"):
+            if not has_access(uid):
+                await send_expired_notice(uid, lang, m.answer)
+                await m.answer(block_text(uid), reply_markup=kb_sub(lang))
+                return
+            await send_debt_direction(uid, lang, "given", m.answer, reply_markup=kb_debt_menu_reply(lang))
+            return
+
+        if t==T("debt_archive_btn"):
+            if not has_access(uid):
+                await send_expired_notice(uid, lang, m.answer)
+                await m.answer(block_text(uid), reply_markup=kb_sub(lang))
+                return
+            await send_debt_archive_list(uid, lang, m.answer, reply_markup=kb_debt_menu_reply(lang))
+            return
+
+        if t==T("sub_week"):
+            nav_push(uid, "sub_payment")
+            await send_subscription_invoice_message(uid, lang, "week", m)
+            return
+
+        if t==T("sub_month"):
+            nav_push(uid, "sub_payment")
+            await send_subscription_invoice_message(uid, lang, "month", m)
+            return
+
+        if t==T("pay_check"):
+            paid = await process_paycheck(uid, lang, m.answer, kb_sub_menu_reply(lang))
+            if paid:
+                nav_reset(uid)
+                STEP[uid] = "main"
+                await m.answer(T("menu"), reply_markup=get_main_menu(lang))
+            return
 
         # hisobla input
         if step=="input_tx":
@@ -1322,15 +1484,16 @@ async def on_text(m:Message):
         if guess_kind(t)=="income":
             await save_tx(uid,"income",amount,curr,acc,"💪 Mehnat daromadlari" if lang=="uz" else "💪 Доход от труда",t)
             await m.answer(T("tx_inc",date=fmt_date(now_tk()),cur=curr,amount=fmt_amount(amount),desc=t))
+            return
         else:
             cat=guess_category(t)
             await save_tx(uid,"expense",amount,curr,acc,cat,t)
             await m.answer(T("tx_exp",date=fmt_date(now_tk()),cur=curr,amount=fmt_amount(amount),cat=cat,desc=t))
-        return
+            return
 
-        await m.answer(T("menu"), reply_markup=get_main_menu(lang))
     except Exception as exc:
         logger.exception("on_text_error", exc_info=exc)
+        nav_reset(uid)
         await m.answer(T("error_generic"), reply_markup=get_main_menu(lang))
 
 @rt.message(F.contact)
@@ -1338,7 +1501,24 @@ async def on_contact(m:Message):
     uid=m.from_user.id
     if STEP.get(uid)!="need_phone": return
     await ensure_month_rollover()
-    await m.answer((t_uz if get_lang(uid)=="uz" else t_ru)("menu"), reply_markup=get_main_menu(get_lang(uid))); STEP[uid]="main"
+    phone = None
+    contact = m.contact
+    if contact:
+        phone = contact.phone_number
+    username = m.from_user.username if m.from_user else None
+    first_name = m.from_user.first_name if m.from_user else None
+    last_name = m.from_user.last_name if m.from_user else None
+    update_user_profile(
+        uid,
+        phone=phone,
+        username=username,
+        first_name=first_name,
+        last_name=last_name,
+        contact_verified_at=datetime.now(timezone.utc).isoformat(),
+    )
+    nav_reset(uid)
+    await m.answer((t_uz if get_lang(uid)=="uz" else t_ru)("menu"), reply_markup=get_main_menu(get_lang(uid)))
+    STEP[uid]="main"
 
 # ====== REPORT/DEBT CALLBACKS ======
 @reports_range_router.callback_query(F.data=="rep:range")
@@ -1352,48 +1532,86 @@ async def report_range_custom_cb(c:CallbackQuery):
         await c.message.answer(block_text(uid), reply_markup=kb_sub(lang))
         await c.answer()
         return
+    nav_push(uid, "report_range")
     STEP[uid]="report_range_start"
     REPORT_RANGE_STATE.pop(uid, None)
     await c.message.answer(T("rep_range_start"))
     await c.answer()
 
 
+async def send_debt_archive_list(uid: int, lang: str, answer_call, reply_markup=None) -> None:
+    await ensure_month_rollover()
+    await ensure_subscription_state(uid)
+    items = DEBTS_ARCHIVE.get(uid, [])
+    T = L(lang)
+    if not items:
+        if reply_markup is not None:
+            await answer_call(T("debt_archive_empty"), reply_markup=reply_markup)
+        else:
+            await answer_call(T("debt_archive_empty"))
+        return
+    if reply_markup is not None:
+        await answer_call(T("debt_archive_header"), reply_markup=reply_markup)
+    else:
+        await answer_call(T("debt_archive_header"))
+    for it in reversed(items[-10:]):
+        copy = dict(it)
+        ts_val = copy.get("ts")
+        if isinstance(ts_val, str):
+            try:
+                copy["ts"] = datetime.fromisoformat(ts_val)
+            except Exception:
+                copy["ts"] = now_tk()
+        elif not isinstance(ts_val, datetime):
+            copy["ts"] = now_tk()
+        text = debt_card(copy, lang)
+        arch_val = copy.get("archived_at")
+        if isinstance(arch_val, str):
+            try:
+                arch_dt = datetime.fromisoformat(arch_val)
+            except Exception:
+                arch_dt = None
+        elif isinstance(arch_val, datetime):
+            arch_dt = arch_val
+        else:
+            arch_dt = None
+        if arch_dt:
+            text += f"\n{T('debt_archive_note', date=fmt_date(arch_dt))}"
+        await answer_call(text)
+
+
+async def send_debt_direction(uid: int, lang: str, direction: str, answer_call, reply_markup=None) -> None:
+    await ensure_month_rollover()
+    T = L(lang)
+    head = (
+        "🧾 Qarzim ro‘yxati:" if direction == "mine" and lang == "uz"
+        else ("💸 Qarzdorlar ro‘yxati:" if lang == "uz" and direction == "given"
+              else ("🧾 Мои долги:" if direction == "mine" else "💸 Должники:"))
+    )
+    if reply_markup is not None:
+        await answer_call(head, reply_markup=reply_markup)
+    else:
+        await answer_call(head)
+    debts = [x for x in MEM_DEBTS.get(uid, []) if x["direction"] == direction]
+    if not debts:
+        if reply_markup is not None:
+            await answer_call(T("rep_empty"), reply_markup=reply_markup)
+        else:
+            await answer_call(T("rep_empty"))
+        return
+    for it in reversed(debts[-10:]):
+        txt = debt_card(it, lang)
+        if it["status"] == "wait":
+            await answer_call(txt, reply_markup=kb_debt_done(it["direction"], it["id"], lang))
+        else:
+            await answer_call(txt)
+
+
 @debts_archive_router.callback_query(F.data=="debt:archive")
 async def debt_archive_cb(c:CallbackQuery):
     uid=c.from_user.id
     lang=get_lang(uid); T=L(lang)
-    await ensure_month_rollover()
-    await ensure_subscription_state(uid)
-    items=DEBTS_ARCHIVE.get(uid, [])
-    if not items:
-        await c.message.answer(T("debt_archive_empty"))
-        await c.answer()
-        return
-    await c.message.answer(T("debt_archive_header"))
-    for it in reversed(items[-10:]):
-        copy=dict(it)
-        ts_val=copy.get("ts")
-        if isinstance(ts_val, str):
-            try:
-                copy["ts"]=datetime.fromisoformat(ts_val)
-            except Exception:
-                copy["ts"]=now_tk()
-        elif not isinstance(ts_val, datetime):
-            copy["ts"]=now_tk()
-        text=debt_card(copy, lang)
-        arch_val=copy.get("archived_at")
-        if isinstance(arch_val, str):
-            try:
-                arch_dt=datetime.fromisoformat(arch_val)
-            except Exception:
-                arch_dt=None
-        elif isinstance(arch_val, datetime):
-            arch_dt=arch_val
-        else:
-            arch_dt=None
-        if arch_dt:
-            text+=f"\n{T('debt_archive_note', date=fmt_date(arch_dt))}"
-        await c.message.answer(text)
+    await send_debt_archive_list(uid, lang, c.message.answer)
     await c.answer()
 
 
@@ -1410,6 +1628,7 @@ async def rep_cb(c:CallbackQuery):
     if kind=="range":
         return
     if kind=="tx":
+        nav_push(uid, "report_range")
         await c.message.answer(T("report_main"), reply_markup=kb_rep_range(lang)); await c.answer(); return
     if kind in ("day","week","month"):
         since,until=report_range(kind)
@@ -1420,6 +1639,7 @@ async def rep_cb(c:CallbackQuery):
             lines.append(T("rep_line",date=fmt_date(it["ts"]),kind=("Kirim" if it["kind"]=="income" else ("Расход" if lang=="ru" else "Chiqim")),cat=it["category"],amount=fmt_amount(it["amount"]),cur=it["currency"]))
         await c.message.answer("\n".join(lines)); await c.answer(); return
     if kind=="debts":
+        nav_push(uid, "report_debts")
         debts=list(reversed(MEM_DEBTS.get(uid,[])))[:10]
         if not debts: await c.message.answer(T("rep_empty")); await c.answer(); return
         for it in debts:
@@ -1438,15 +1658,9 @@ async def debt_cb(c:CallbackQuery):
     if d=="archive":
         return
     direction="mine" if d=="mine" else "given"
-    head="🧾 Qarzim ro‘yxati:" if direction=="mine" and lang=="uz" else ("💸 Qarzdorlar ro‘yxati:" if lang=="uz" else ("🧾 Мои долги:" if direction=="mine" else "💸 Должники:"))
-    await c.message.answer(head)
-    debts=[x for x in MEM_DEBTS.get(uid,[]) if x["direction"]==direction]
-    if not debts: await c.message.answer(T("rep_empty")); await c.answer(); return
-    for it in reversed(debts[-10:]):
-        txt=debt_card(it, lang)
-        if it["status"]=="wait": await c.message.answer(txt, reply_markup=kb_debt_done(it["direction"],it["id"], lang))
-        else: await c.message.answer(txt)
+    await send_debt_direction(uid, lang, direction, c.message.answer)
     await c.answer()
+
 
 @rt.callback_query(F.data.startswith("debtdone:"))
 async def debt_done(c:CallbackQuery):
@@ -1545,6 +1759,7 @@ async def analiz_cmd(m: Message):
     )
 
     await m.answer(text)
+    nav_reset(uid)
     await m.answer(T("menu"), reply_markup=get_main_menu(lang))
 
 # ------ OBUNA (CLICK flow) ------
@@ -1560,57 +1775,64 @@ def create_click_link(pid:str, amount:int)->str:
         params += f"&return_url={quote_plus(PAYMENT_RETURN_URL)}"
     return f"{CLICK_PAY_URL_BASE}?{params}"
 
-@rt.callback_query(F.data.startswith("sub:"))
-async def sub_cb(c:CallbackQuery):
-    uid=c.from_user.id
-    lang=get_lang(uid); T=L(lang)
-    code=c.data.split(":")[1]
+
+async def send_subscription_invoice_message(uid: int, lang: str, code: str, message: Message) -> None:
+    T = L(lang)
     use_miniapp = False
-    if code=="week":
-        plan=T("sub_week"); days=7; price=7900
+    if code == "week":
+        plan = T("sub_week")
+        days = 7
+        price = 7900
     else:
-        plan=T("sub_month"); days=30; price=MONTH_PLAN_PRICE
+        plan = T("sub_month")
+        days = 30
+        price = MONTH_PLAN_PRICE
         use_miniapp = True
-    invoice_id = await payments_create_invoice(uid, Decimal(price), "UZS")
-    pid=str(uuid.uuid4())
-    pid=invoice_id
-    plan_info = payments_detect_plan(Decimal(price))
+    amount_dec = Decimal(price)
+    invoice_id = await payments_create_invoice(uid, amount_dec, "UZS")
+    pid = str(invoice_id)
+    plan_info = payments_detect_plan(amount_dec)
     plan_key = plan_info[0] if plan_info else None
-    PENDING_PAYMENTS[pid]={
-        "uid":uid,
-        "invoice_id":pid,
-        "plan":plan,
-        "plan_key":plan_key,
-        "period_days":days,
-        "amount":price,
-        "currency":"UZS",
-        "status":"pending",
-        "created":now_tk()
+    PENDING_PAYMENTS[pid] = {
+        "uid": uid,
+        "invoice_id": pid,
+        "plan": plan,
+        "plan_key": plan_key,
+        "period_days": days,
+        "amount": price,
+        "currency": "UZS",
+        "status": "pending",
+        "created": now_tk(),
     }
-    link=create_click_link(pid, price)
+    link = create_click_link(pid, price)
     if use_miniapp:
         mini_url = build_miniapp_url(WEB_BASE, price, invoice_id, RETURN_URL)
         markup = kb_payment_with_miniapp(pid, link, lang, mini_url)
     else:
         markup = kb_payment(pid, link, lang)
-    await c.message.answer(T("sub_created", plan=plan, amount=price), reply_markup=markup)
+    await message.answer(T("sub_created", plan=plan, amount=price), reply_markup=markup)
+
+
+@rt.callback_query(F.data.startswith("sub:"))
+async def sub_cb(c:CallbackQuery):
+    uid=c.from_user.id
+    lang=get_lang(uid)
+    code=c.data.split(":")[1]
+    nav_push(uid, "sub_payment")
+    await send_subscription_invoice_message(uid, lang, code, c.message)
     await c.answer()
 
-@rt.callback_query(F.data.startswith("paycheck:"))
-async def paycheck_cb(c:CallbackQuery):
-    pid=c.data.split(":")[1]
-    pay=PENDING_PAYMENTS.get(pid)
-    lang=get_lang(pay["uid"]) if pay else get_lang(c.from_user.id)
-    T=L(lang)
-    await c.message.answer(T("pay_checking"))
-    await ensure_subscription_state(c.from_user.id)
-    record = await payments_get_latest_payment(c.from_user.id)
+
+async def process_paycheck(uid: int, lang: str, answer_call, reply_markup, pay: Optional[dict] = None) -> bool:
+    T = L(lang)
+    await answer_call(T("pay_checking"))
+    await ensure_subscription_state(uid)
+    record = await payments_get_latest_payment(uid)
     if not record:
-        await c.message.answer(T("pay_status_missing"), reply_markup=get_main_menu(lang))
-        await c.message.answer(T("sub_create_first"), reply_markup=get_main_menu(lang))
-        await c.message.answer(T("SUB_MISSING"), reply_markup=get_main_menu(lang))
-        await c.answer()
-        return
+        await answer_call(T("pay_status_missing"), reply_markup=reply_markup)
+        await answer_call(T("sub_create_first"), reply_markup=reply_markup)
+        await answer_call(T("SUB_MISSING"), reply_markup=reply_markup)
+        return False
     status = (record.get("status") or "").lower()
     amount_dec = Decimal(str(record.get("amount", "0")))
     plan_info = payments_detect_plan(amount_dec)
@@ -1627,11 +1849,10 @@ async def paycheck_cb(c:CallbackQuery):
     if period_days <= 0:
         period_days = (pay.get("period_days") if pay else 0) or 30
     if status != "paid":
-        await c.message.answer(T("pay_status_pending"), reply_markup=get_main_menu(lang))
-        await c.message.answer(T("sub_pending_wait"), reply_markup=get_main_menu(lang))
-        await c.message.answer(T("SUB_PENDING"), reply_markup=get_main_menu(lang))
-        await c.answer()
-        return
+        await answer_call(T("pay_status_pending"), reply_markup=reply_markup)
+        await answer_call(T("sub_pending_wait"), reply_markup=reply_markup)
+        await answer_call(T("SUB_PENDING"), reply_markup=reply_markup)
+        return False
     paid_iso = record.get("paid_at")
     try:
         paid_dt = datetime.fromisoformat(paid_iso) if paid_iso else now_tk()
@@ -1643,37 +1864,28 @@ async def paycheck_cb(c:CallbackQuery):
     until = paid_dt + timedelta(days=period_days or 0)
     if period_days <= 0 and pay:
         until = now_tk() + timedelta(days=pay.get("period_days", 0))
-    uid = record.get("user_id") or c.from_user.id
-    SUB_EXPIRES[uid]=until
-    await set_user_subscription(uid, paid_dt, until)
+    uid_db = record.get("user_id") or uid
+    SUB_EXPIRES[uid_db] = until
+    await set_user_subscription(uid_db, paid_dt, until)
     if pay:
-        pay["status"]="paid"
-    await c.message.answer(T("pay_status_paid", plan=plan_label, until=fmt_date(until)), reply_markup=get_main_menu(lang))
-    await c.message.answer(T("sub_ok", start=fmt_date(paid_dt), end=fmt_date(until)), reply_markup=get_main_menu(lang))
-    await c.message.answer(T("SUB_OK"), reply_markup=get_main_menu(lang))
+        pay["status"] = "paid"
+    await answer_call(T("pay_status_paid", plan=plan_label, until=fmt_date(until)), reply_markup=reply_markup)
+    await answer_call(T("sub_ok", start=fmt_date(paid_dt), end=fmt_date(until)), reply_markup=reply_markup)
+    await answer_call(T("SUB_OK"), reply_markup=reply_markup)
+    return True
+
+@rt.callback_query(F.data.startswith("paycheck:"))
+async def paycheck_cb(c:CallbackQuery):
+    pid=c.data.split(":")[1]
+    pay=PENDING_PAYMENTS.get(pid)
+    lang=get_lang(pay["uid"]) if pay else get_lang(c.from_user.id)
+    paid = await process_paycheck(c.from_user.id, lang, c.message.answer, get_main_menu(lang), pay)
+    if paid:
+        target_uid = pay.get("uid") if pay else c.from_user.id
+        nav_reset(target_uid)
     await c.answer()
 
 # ====== BALANS ======
-def card_actions_kb(card_id:int, lang:str, is_admin:bool)->InlineKeyboardMarkup:
-    T=L(lang)
-    buttons=[[InlineKeyboardButton(text=T("card_copy_pan"), callback_data=f"cardcopy:num:{card_id}")],
-             [InlineKeyboardButton(text=T("card_copy_owner"), callback_data=f"cardcopy:owner:{card_id}")]]
-    if is_admin:
-        buttons.append([InlineKeyboardButton(text=T("card_delete_btn"), callback_data=f"carddel:{card_id}")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
-async def send_cards_list(uid:int, m:Message, lang:str)->None:
-    T=L(lang)
-    if not CARDS:
-        await m.answer(T("cards_none"), reply_markup=kb_card_add(lang))
-        return
-    await m.answer(T("cards_header"))
-    for card in sorted(CARDS.values(), key=lambda x: x.get("created_at", "")):
-        default_tag = T("cards_default_tag") if card.get("is_default") else ""
-        text=T("cards_line", label=card.get("label","—"), pan=card.get("pan_masked","—"), owner=card.get("owner","—"), default=default_tag)
-        kb=card_actions_kb(card.get("id"), lang, bool(ADMIN_ID and uid==ADMIN_ID))
-        await m.answer(text, reply_markup=kb)
 
 
 async def send_balance(uid:int, m:Message):
@@ -1708,114 +1920,7 @@ async def send_balance(uid:int, m:Message):
 
 
 # ====== CARDS MANAGEMENT ======
-@cards_router.callback_query(F.data=="cardadd:start")
-async def card_add_start_cb(c:CallbackQuery):
-    uid=c.from_user.id
-    lang=get_lang(uid)
-    T=L(lang)
-    await ensure_month_rollover()
-    CARD_ADD_STATE.pop(uid, None)
-    STEP[uid]="card_add_label"
-    await c.message.answer(T("card_add_ask_label"))
-    await c.answer()
 
-
-@cards_router.message(Command("add_card"))
-async def add_card_cmd(m:Message):
-    if ADMIN_ID and m.from_user.id!=ADMIN_ID:
-        await m.answer(L(get_lang(m.from_user.id))("card_access_denied"))
-        return
-    await ensure_month_rollover()
-    parts=m.text.split(maxsplit=1)
-    lang=get_lang(m.from_user.id); T=L(lang)
-    if len(parts)<2:
-        await m.answer(T("card_add_usage"))
-        return
-    fields=[p.strip() for p in parts[1].split(";")]
-    if len(fields)<3:
-        await m.answer(T("card_add_usage"))
-        return
-    label, pan, owner = fields[0], fields[1], fields[2]
-    is_default=False
-    if len(fields)>3:
-        is_default = fields[3] in ("1","true","True","ha","yes")
-    if is_default:
-        for it in CARDS.values():
-            it["is_default"] = False
-    card_id=next_card_id()
-    CARDS[card_id]={
-        "id":card_id,
-        "label":label,
-        "pan_masked":pan,
-        "owner":owner,
-        "is_default":is_default,
-        "created_at":now_tk().isoformat()
-    }
-    save_cards_storage()
-    await m.answer(T("card_added"))
-
-
-@cards_router.message(Command("del_card"))
-async def del_card_cmd(m:Message):
-    if ADMIN_ID and m.from_user.id!=ADMIN_ID:
-        await m.answer(L(get_lang(m.from_user.id))("card_access_denied"))
-        return
-    await ensure_month_rollover()
-    parts=m.text.strip().split()
-    lang=get_lang(m.from_user.id); T=L(lang)
-    if len(parts)!=2:
-        await m.answer(T("card_del_usage"))
-        return
-    try:
-        cid=int(parts[1])
-    except Exception:
-        await m.answer(T("card_del_usage"))
-        return
-    card=CARDS.pop(cid, None)
-    if not card:
-        await m.answer(T("card_not_found"))
-        return
-    save_cards_storage()
-    await m.answer(T("card_deleted"))
-
-
-@cards_router.callback_query(F.data.startswith("cardcopy:"))
-async def card_copy_cb(c:CallbackQuery):
-    await ensure_month_rollover()
-    parts=c.data.split(":")
-    if len(parts)!=3:
-        await c.answer(); return
-    _, mode, sid = parts
-    try:
-        cid=int(sid)
-    except Exception:
-        await c.answer(); return
-    card=CARDS.get(cid)
-    if not card:
-        await c.answer(L(get_lang(c.from_user.id))("card_not_found"), show_alert=True)
-        return
-    if mode=="num":
-        await c.answer(card.get("pan_masked",""), show_alert=True)
-    else:
-        await c.answer(card.get("owner",""), show_alert=True)
-
-
-@cards_router.callback_query(F.data.startswith("carddel:"))
-async def card_delete_cb(c:CallbackQuery):
-    if ADMIN_ID and c.from_user.id!=ADMIN_ID:
-        await c.answer(); return
-    await ensure_month_rollover()
-    try:
-        cid=int(c.data.split(":")[1])
-    except Exception:
-        await c.answer(); return
-    card=CARDS.pop(cid, None)
-    if not card:
-        await c.answer(L(get_lang(c.from_user.id))("card_not_found"), show_alert=True)
-        return
-    save_cards_storage()
-    await c.message.answer(L(get_lang(c.from_user.id))("card_deleted"))
-    await c.answer()
 
 # ====== CATEGORY ======
 def guess_category(text:str)->str:
@@ -1884,18 +1989,15 @@ async def set_cmds():
 # ====== MAIN ======
 async def main():
     await ensure_payment_schema()
-    await ensure_cards_table()
     load_cards_storage()
+    load_users_storage()
     load_debts_archive()
     load_analysis_state()
     await ensure_month_rollover()
     dp.update.middleware(StartGateMiddleware())
-    dp.include_router(contact_router)
     dp.include_router(reports_range_router)
     dp.include_router(cards_entry_router)
-    dp.include_router(cards_router)
     dp.include_router(debts_archive_router)
-    dp.include_router(cards_stub_router)
     dp.include_router(sub_router)
     dp.include_router(pay_debug_router)
     dp.include_router(subscription_router)
@@ -1909,112 +2011,66 @@ async def main():
     asyncio.create_task(debt_reminder())
     print("Bot ishga tushdi."); await dp.start_polling(bot)
 
-if __name__ == "__main__":
-    asyncio.run(main())
 @cards_entry_router.message(Command("kartalarim"))
 @cards_entry_router.message(Command("kartam"))
 async def cards_command_entry(message: Message, state: FSMContext):
-    await handle_cards_open(message, state)
+    await enter_cards_menu(message, state)
 
 
-@cards_entry_router.message(F.text.in_({"💳 Kartalarim", "Kartalarim", "💳 Мои карты"}))
+@cards_entry_router.message(F.text.in_(CARD_MENU_TEXTS))
 async def cards_text_entry(message: Message, state: FSMContext):
-    await handle_cards_open(message, state)
-@cards_entry_router.callback_query(F.data == "cards:add")
-async def cards_add_callback(c: CallbackQuery, state: FSMContext):
-    uid = c.from_user.id
-    lang = get_lang(uid)
-    await ensure_month_rollover()
-    await ensure_cards_table()
-    if not is_card_admin(uid):
-        await c.answer(L(lang)("CARDS_ADMIN_ONLY"), show_alert=True)
-        return
-    await state.clear()
-    await state.set_state(CardAddStates.pan)
-    await c.message.answer(L(lang)("CARDS_ASK_PAN"), reply_markup=get_main_menu(lang))
-    await c.answer()
+    await enter_cards_menu(message, state)
 
 
-@cards_entry_router.message(CardAddStates.pan)
-async def cards_add_pan(message: Message, state: FSMContext):
+@cards_entry_router.message(F.text.in_(CARD_ADD_TEXTS))
+async def cards_start_add(message: Message, state: FSMContext):
     uid = message.from_user.id
     lang = get_lang(uid)
-    if not is_card_admin(uid):
-        await message.answer(L(lang)("CARDS_ADMIN_ONLY"), reply_markup=get_main_menu(lang))
-        await state.clear()
-        return
-    digits = re.sub(r"\D", "", message.text or "")
-    if len(digits) != 16:
-        await message.answer(L(lang)("CARDS_INVALID_PAN"), reply_markup=get_main_menu(lang))
-        return
-    masked = "**** **** **** " + digits[-4:]
-    await state.update_data(pan_masked=masked)
-    await state.set_state(CardAddStates.expires)
-    await message.answer(L(lang)("CARDS_ASK_EXPIRES"), reply_markup=get_main_menu(lang))
-    return
-
-
-@cards_entry_router.message(CardAddStates.expires)
-async def cards_add_expires(message: Message, state: FSMContext):
-    uid = message.from_user.id
-    lang = get_lang(uid)
-    if not is_card_admin(uid):
-        await message.answer(L(lang)("CARDS_ADMIN_ONLY"), reply_markup=get_main_menu(lang))
-        await state.clear()
-        return
-    text = (message.text or "").strip()
-    if not re.fullmatch(r"(0[1-9]|1[0-2])/\d{2}", text):
-        await message.answer(L(lang)("CARDS_INVALID_EXPIRES"), reply_markup=get_main_menu(lang))
-        return
-    await state.update_data(expires=text)
-    await state.set_state(CardAddStates.owner)
-    await message.answer(L(lang)("CARDS_ASK_OWNER"), reply_markup=get_main_menu(lang))
-    return
-
-
-@cards_entry_router.message(CardAddStates.owner)
-async def cards_add_owner(message: Message, state: FSMContext):
-    uid = message.from_user.id
-    lang = get_lang(uid)
-    if not is_card_admin(uid):
-        await message.answer(L(lang)("CARDS_ADMIN_ONLY"), reply_markup=get_main_menu(lang))
-        await state.clear()
-        return
-    owner = (message.text or "").strip()
-    if not owner:
-        await message.answer(L(lang)("CARDS_ASK_OWNER"), reply_markup=get_main_menu(lang))
-        return
-    await state.update_data(owner_fullname=owner)
     await state.set_state(CardAddStates.label)
-    await message.answer(L(lang)("CARDS_ASK_LABEL"), reply_markup=get_main_menu(lang))
-    return
+    await message.answer(L(lang)("cards_prompt_label", back=L(lang)("btn_back")), reply_markup=kb_card_cancel(lang))
 
 
 @cards_entry_router.message(CardAddStates.label)
-async def cards_add_label(message: Message, state: FSMContext):
+async def cards_collect_label(message: Message, state: FSMContext):
     uid = message.from_user.id
     lang = get_lang(uid)
-    if not is_card_admin(uid):
-        await message.answer(L(lang)("CARDS_ADMIN_ONLY"), reply_markup=get_main_menu(lang))
+    text = (message.text or "").strip()
+    if _is_cancel(text, lang):
         await state.clear()
+        await show_cards_overview(message, lang)
         return
-    label = (message.text or "").strip()
-    if not label:
-        await message.answer(L(lang)("CARDS_ASK_LABEL"), reply_markup=get_main_menu(lang))
+    if not (2 <= len(text) <= 32):
+        await message.answer(L(lang)("cards_format_error"), reply_markup=kb_card_cancel(lang))
+        return
+    await state.update_data(label=text)
+    await state.set_state(CardAddStates.pan)
+    await message.answer(L(lang)("cards_prompt_pan", back=L(lang)("btn_back")), reply_markup=kb_card_cancel(lang))
+
+
+@cards_entry_router.message(CardAddStates.pan)
+async def cards_collect_pan(message: Message, state: FSMContext):
+    uid = message.from_user.id
+    lang = get_lang(uid)
+    raw = (message.text or "").strip()
+    if _is_cancel(raw, lang):
+        await state.clear()
+        await show_cards_overview(message, lang)
+        return
+    digits = re.sub(r"\D", "", raw)
+    if not digits.isdigit() or not (13 <= len(digits) <= 19):
+        await message.answer(L(lang)("cards_format_error"), reply_markup=kb_card_cancel(lang))
         return
     data = await state.get_data()
-    pan_masked = data.get("pan_masked")
-    expires = data.get("expires")
-    owner = data.get("owner_fullname")
-    if not pan_masked or not expires or not owner:
-        await message.answer(L(lang)("CARDS_INVALID_PAN"), reply_markup=get_main_menu(lang))
+    label = data.get("label")
+    if not label:
         await state.clear()
+        await show_cards_overview(message, lang)
         return
-    await insert_user_card(uid, label, pan_masked, expires, owner)
-    await message.answer(L(lang)("CARDS_ADDED"), reply_markup=get_main_menu(lang))
+    save_card(uid, label, digits[-4:])
     await state.clear()
-    await present_user_cards(message, lang)
-    return
+    await message.answer(L(lang)("cards_saved"), reply_markup=kb_cards_menu(lang))
+    await show_cards_overview(message, lang)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
