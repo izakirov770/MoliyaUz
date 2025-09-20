@@ -1482,6 +1482,7 @@ async def on_text(m:Message):
                 await send_expired_notice(uid, lang, m.answer)
                 await m.answer(block_text(uid), reply_markup=kb_sub(lang)); return
             kind=guess_kind(t)
+            due0 = None
             if kind in ("debt_mine","debt_given"):
                 amount=parse_amount(t) or 0
                 if amount<=0: await m.answer(T("debt_need")); return
