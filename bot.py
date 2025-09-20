@@ -1537,43 +1537,59 @@ async def on_text(m:Message):
                 await m.answer(T("menu"), reply_markup=get_main_menu(lang))
             return
 
+        kind=guess_kind(t)
+
+        async def handle_debt(kind_label: str) -> None:
+            amount_val = parse_amount(t) or 0
+            if amount_val <= 0:
+                await m.answer(T("debt_need"))
+                return
+            curr_val = detect_currency(t)
+            who_val = parse_counterparty(t)
+            due_val = parse_due_date(t)
+
+            if due_val:
+                await save_debt(uid, "mine" if kind_label == "debt_mine" else "given", amount_val, curr_val, who_val, due_val)
+
+                # Debt create moment -> balansga darhol ta'sir
+                if kind_label == "debt_mine":
+                    await save_tx(uid, "income", amount_val, curr_val, "cash", "💳 Qarz olindi", "")
+                    await m.answer(T("debt_saved_mine", who=who_val, cur=curr_val, amount=fmt_amount(amount_val), due=due_val))
+                else:
+                    await save_tx(uid, "expense", amount_val, curr_val, "cash", "💳 Qarz berildi", "")
+                    await m.answer(T("debt_saved_given", who=who_val, cur=curr_val, amount=fmt_amount(amount_val), due=due_val))
+                return
+
+            PENDING_DEBT[uid] = {
+                "direction": "mine" if kind_label == "debt_mine" else "given",
+                "amount": amount_val,
+                "currency": curr_val,
+                "who": who_val,
+            }
+            STEP[uid] = "debt_mine_due" if kind_label == "debt_mine" else "debt_given_due"
+            await m.answer(T("ask_due_mine") if kind_label == "debt_mine" else T("ask_due_given"))
+
         # hisobla input
         if step=="input_tx":
             if not has_access(uid):
                 await send_expired_notice(uid, lang, m.answer)
                 await m.answer(block_text(uid), reply_markup=kb_sub(lang)); return
-            kind=guess_kind(t)
             if kind in ("debt_mine","debt_given"):
-                amount=parse_amount(t) or 0
-                if amount<=0:
-                    await m.answer(T("debt_need")); return
-                curr=detect_currency(t)
-                who=parse_counterparty(t)
-                due0=parse_due_date(t)
-
-                if due0:
-                    did = await save_debt(uid, "mine" if kind=="debt_mine" else "given", amount, curr, who, due0)
-
-                    # Debt create moment -> balansga darhol ta'sir
-                    if kind=="debt_mine":
-                        await save_tx(uid,"income",amount,curr,"cash","💳 Qarz olindi","")
-                    else:
-                        await save_tx(uid,"expense",amount,curr,"cash","💳 Qarz berildi","")
-
-                    if kind=="debt_mine":
-                        await m.answer(T("debt_saved_mine", who=who, cur=curr, amount=fmt_amount(amount), due=due0))
-                    else:
-                        await m.answer(T("debt_saved_given", who=who, cur=curr, amount=fmt_amount(amount), due=due0))
-                else:
-                    PENDING_DEBT[uid]={"direction":"mine" if kind=="debt_mine" else "given","amount":amount,"currency":curr,"who":who}
-                    STEP[uid]="debt_mine_due" if kind=="debt_mine" else "debt_given_due"
-                    await m.answer(T("ask_due_mine") if kind=="debt_mine" else T("ask_due_given"))
+                await handle_debt(kind)
                 return
+
+        if step!="input_tx" and kind in ("debt_mine","debt_given"):
+            if not has_access(uid):
+                await send_expired_notice(uid, lang, m.answer)
+                await m.answer(block_text(uid), reply_markup=kb_sub(lang))
+                return
+            await handle_debt(kind)
+            return
 
         amount=parse_amount(t)
         if amount is None: await m.answer(T("need_sum")); return
         curr=detect_currency(t); acc=detect_account(t)
-        if guess_kind(t)=="income":
+        if kind=="income":
             await save_tx(uid,"income",amount,curr,acc,"💪 Mehnat daromadlari" if lang=="uz" else "💪 Доход от труда",t)
             await m.answer(T("tx_inc",date=fmt_date(now_tk()),cur=curr,amount=fmt_amount(amount),desc=t))
             return
