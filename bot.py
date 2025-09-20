@@ -1482,31 +1482,32 @@ async def on_text(m:Message):
                 await send_expired_notice(uid, lang, m.answer)
                 await m.answer(block_text(uid), reply_markup=kb_sub(lang)); return
             kind=guess_kind(t)
-            due0 = None
             if kind in ("debt_mine","debt_given"):
                 amount=parse_amount(t) or 0
-                if amount<=0: await m.answer(T("debt_need")); return
-                curr=detect_currency(t); who=parse_counterparty(t)
+                if amount<=0:
+                    await m.answer(T("debt_need")); return
+                curr=detect_currency(t)
+                who=parse_counterparty(t)
                 due0=parse_due_date(t)
 
-            if due0:
-                did = await save_debt(uid, "mine" if kind=="debt_mine" else "given", amount, curr, who, due0)
+                if due0:
+                    did = await save_debt(uid, "mine" if kind=="debt_mine" else "given", amount, curr, who, due0)
 
-                # Debt create moment -> balansga darhol ta'sir
-                if kind=="debt_mine":
-                    await save_tx(uid,"income",amount,curr,"cash","💳 Qarz olindi","")
-                else:
-                    await save_tx(uid,"expense",amount,curr,"cash","💳 Qarz berildi","")
+                    # Debt create moment -> balansga darhol ta'sir
+                    if kind=="debt_mine":
+                        await save_tx(uid,"income",amount,curr,"cash","💳 Qarz olindi","")
+                    else:
+                        await save_tx(uid,"expense",amount,curr,"cash","💳 Qarz berildi","")
 
-                if kind=="debt_mine":
-                    await m.answer(T("debt_saved_mine", who=who, cur=curr, amount=fmt_amount(amount), due=due0))
+                    if kind=="debt_mine":
+                        await m.answer(T("debt_saved_mine", who=who, cur=curr, amount=fmt_amount(amount), due=due0))
+                    else:
+                        await m.answer(T("debt_saved_given", who=who, cur=curr, amount=fmt_amount(amount), due=due0))
                 else:
-                    await m.answer(T("debt_saved_given", who=who, cur=curr, amount=fmt_amount(amount), due=due0))
-            else:
-                PENDING_DEBT[uid]={"direction":"mine" if kind=="debt_mine" else "given","amount":amount,"currency":curr,"who":who}
-                STEP[uid]="debt_mine_due" if kind=="debt_mine" else "debt_given_due"
-                await m.answer(T("ask_due_mine") if kind=="debt_mine" else T("ask_due_given"))
-            return
+                    PENDING_DEBT[uid]={"direction":"mine" if kind=="debt_mine" else "given","amount":amount,"currency":curr,"who":who}
+                    STEP[uid]="debt_mine_due" if kind=="debt_mine" else "debt_given_due"
+                    await m.answer(T("ask_due_mine") if kind=="debt_mine" else T("ask_due_given"))
+                return
 
         amount=parse_amount(t)
         if amount is None: await m.answer(T("need_sum")); return
