@@ -8,7 +8,7 @@ import aiosqlite
 from aiogram import Bot
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response, Query
-from fastapi.responses import RedirectResponse, PlainTextResponse
+from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from zoneinfo import ZoneInfo
 from urllib.parse import urlencode, quote
@@ -40,6 +40,10 @@ except Exception:
     LOCAL_TZ = ZoneInfo("Asia/Tashkent")
 
 bot = Bot(BOT_TOKEN) if BOT_TOKEN else None
+
+SUCCESS_PAGE = """<!doctype html><html lang=\"uz\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>To'lov tasdiqlandi</title><style>body{font-family:'Segoe UI',Arial,sans-serif;background:#0f172a;color:#f8fafc;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:16px;}main{max-width:360px;text-align:center;background:#111c34;border-radius:18px;padding:32px 28px;box-shadow:0 20px 45px rgba(15,23,42,.45);}h1{font-size:24px;margin-bottom:12px;}p{margin:0 0 18px;line-height:1.5;color:#cbd5f5;}a.button{display:inline-flex;align-items:center;justify-content:center;padding:12px 20px;border-radius:999px;background:#38bdf8;color:#0f172a;text-decoration:none;font-weight:600;}a.button:hover{background:#0ea5e9;}small{display:block;margin-top:18px;font-size:12px;color:#64748b;}svg{width:60px;height:60px;fill:none;stroke:#38bdf8;stroke-width:1.8;margin-bottom:16px;}</style></head><body><main><svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"9\" stroke=\"rgba(56,189,248,0.35)\" stroke-width=\"2\"/><path d=\"M8.5 12.5l2.3 2.4 4.7-5.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg><h1>To'lov tasdiqlandi ✅</h1><p>Telegram botga qayting va ilovadagi oynani yoping. Obuna holatini bot avtomatik yangiladi.</p>{button_html}<small>Agar Telegram o'zi yopilmasa, ushbu oynani yopib botga qayting.</small></main><script>try{if(window.Telegram&&window.Telegram.WebApp){window.Telegram.WebApp.close();}}catch(e){}</script></body></html>"""
+
+ERROR_PAGE = """<!doctype html><html lang=\"uz\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>To'lov topilmadi</title><style>body{font-family:'Segoe UI',Arial,sans-serif;background:#0f172a;color:#f8fafc;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:16px;}main{max-width:360px;text-align:center;background:#111c34;border-radius:18px;padding:32px 28px;box-shadow:0 20px 45px rgba(15,23,42,.45);}h1{font-size:24px;margin-bottom:12px;}p{margin:0;line-height:1.5;color:#cbd5f5;}</style></head><body><main><h1>To'lov topilmadi 😕</h1><p>Invoice ID noto'g'ri yoki allaqachon tasdiqlangan. Telegramga qaytib, botdan so'rov yuboring.</p></main></body></html>"""
 
 app = FastAPI()
 
@@ -107,8 +111,18 @@ def payments_return(invoice_id: str):
 
     ok = activate_invoice(invoice_id)
     if not ok:
-        return PlainTextResponse("Invoice not found", status_code=404)
-    return PlainTextResponse("OK", status_code=200)
+        return HTMLResponse(ERROR_PAGE, status_code=404)
+
+    bot_username = (os.getenv("BOT_USERNAME", "") or "").lstrip("@")
+    button_html = ""
+    if bot_username:
+        bot_link = f"https://t.me/{bot_username}"
+        button_html = (
+            f"<a class=\"button\" href=\"{bot_link}\" target=\"_blank\">Botga qaytish</a>"
+        )
+
+    html = SUCCESS_PAGE.replace("{button_html}", button_html)
+    return HTMLResponse(html)
 
 
 async def _read_payload(request: Request) -> Dict[str, Any]:
@@ -199,25 +213,3 @@ async def payments_callback(request: Request) -> Response:
             end_iso = end_dt.isoformat()
         await _notify_subscription(result.get("user_id"), start_iso, end_iso)
     return Response("SUCCESS", media_type="text/plain")
-from fastapi import Query
-from fastapi.responses import PlainTextResponse
-import sqlite3, datetime, os
-
-def _db():
-    return sqlite3.connect(os.getenv("DB_PATH", "moliya.db"))
-
-def _ensure_user_columns(c):
-    cols = {r[1] for r in c.execute("PRAGMA table_info(users)").fetchall()}
-    if "sub_started_at" not in cols:
-        c.execute("ALTER TABLE users ADD COLUMN sub_started_at TIMESTAMP")
-    if "sub_until" not in cols:
-        c.execute("ALTER TABLE users ADD COLUMN sub_until TIMESTAMP")
-    if "sub_reminder_sent_date" not in cols:
-        c.execute("ALTER TABLE users ADD COLUMN sub_reminder_sent_date DATE")
-
-@app.get("/payments/return")
-def payments_return(invoice_id: str = Query(...)):
-    ok = activate_invoice(invoice_id)
-    if not ok:
-        return PlainTextResponse("Invoice not found", status_code=404)
-    return PlainTextResponse("OK", status_code=200)
