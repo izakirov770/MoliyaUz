@@ -8,7 +8,7 @@ import aiosqlite
 from aiogram import Bot
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response, Query
-from fastapi.responses import RedirectResponse, HTMLResponse
+from fastapi.responses import RedirectResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from zoneinfo import ZoneInfo
 from urllib.parse import urlencode, quote
@@ -25,6 +25,7 @@ load_dotenv()
 
 CLICK_MERCHANT_ID = os.getenv("CLICK_MERCHANT_ID", "")
 CLICK_SERVICE_ID = os.getenv("CLICK_SERVICE_ID", "")
+CLICK_SECRET_KEY = os.getenv("CLICK_SECRET_KEY", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 TZ_NAME = os.getenv("TZ", "Asia/Tashkent")
 SUBSCRIPTION_DAYS = int(os.getenv("SUBSCRIPTION_DAYS", "30"))
@@ -67,6 +68,25 @@ async def _ensure_user_columns_async() -> None:
                 pass
         if statements:
             await db.commit()
+
+
+def _click_error_response(payload: Dict[str, Any], code: int, note: str, prepare_id: Optional[int] = None) -> JSONResponse:
+    base: Dict[str, Any] = {
+        "click_trans_id": payload.get("click_trans_id"),
+        "merchant_trans_id": payload.get("merchant_trans_id")
+        or payload.get("transaction_param")
+        or payload.get("invoice_id"),
+        "error": code,
+        "error_note": note,
+    }
+    if prepare_id is not None:
+        base["merchant_prepare_id"] = prepare_id
+        base["merchant_confirm_id"] = prepare_id
+    return JSONResponse(base)
+
+
+def _click_success_response(payload: Dict[str, Any], prepare_id: int) -> JSONResponse:
+    return _click_error_response(payload, 0, "Success", prepare_id)
 
 
 @app.get("/clickpay/pay")
@@ -123,6 +143,98 @@ async def payments_return(invoice_id: str):
     html = html.replace("__REDIRECT__", redirect_url or "")
     html = html.replace("__DEEPLINK__", deeplink_url)
     return HTMLResponse(html)
+
+
+async def _fetch_invoice(invoice_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not invoice_id:
+        return None
+    try:
+        return await get_payment_by_invoice(invoice_id)
+    except Exception:
+        return None
+
+
+def _extract_invoice_id(payload: Dict[str, Any]) -> Optional[str]:
+    return (
+        payload.get("merchant_trans_id")
+        or payload.get("transaction_param")
+        or payload.get("invoice_id")
+    )
+
+
+def _validate_click_payload(payload: Dict[str, Any]) -> Optional[str]:
+    if CLICK_SERVICE_ID and str(payload.get("service_id")) != CLICK_SERVICE_ID:
+        return "SERVICE_ID_MISMATCH"
+    if CLICK_MERCHANT_ID and str(payload.get("merchant_id")) != CLICK_MERCHANT_ID:
+        return "MERCHANT_ID_MISMATCH"
+    return None
+
+
+async def _verify_amount(payload: Dict[str, Any], record: Dict[str, Any]) -> bool:
+    amount_payload = payload.get("amount") or payload.get("amount_sum")
+    try:
+        return Decimal(str(amount_payload)) == Decimal(str(record.get("amount", "0")))
+    except Exception:
+        return False
+
+
+@app.post("/click/prepare")
+async def click_prepare(request: Request) -> JSONResponse:
+    payload = await _read_payload(request)
+    await log_callback("click_prepare", payload, False)
+
+    await ensure_payment_schema()
+
+    err = _validate_click_payload(payload)
+    if err:
+        return _click_error_response(payload, -4, err)
+
+    invoice_id = _extract_invoice_id(payload)
+    record = await _fetch_invoice(invoice_id)
+    if not record:
+        return _click_error_response(payload, -5, "Invoice not found")
+
+    if not await _verify_amount(payload, record):
+        return _click_error_response(payload, -2, "Amount mismatch", record["id"])
+
+    await log_callback("click_prepare_ok", payload, True)
+    return _click_success_response(payload, record["id"])
+
+
+@app.post("/click/complete")
+async def click_complete(request: Request) -> JSONResponse:
+    payload = await _read_payload(request)
+    await log_callback("click_complete", payload, False)
+
+    await ensure_payment_schema()
+
+    err = _validate_click_payload(payload)
+    if err:
+        return _click_error_response(payload, -4, err)
+
+    invoice_id = _extract_invoice_id(payload)
+    record = await _fetch_invoice(invoice_id)
+    if not record:
+        return _click_error_response(payload, -5, "Invoice not found")
+
+    if not await _verify_amount(payload, record):
+        return _click_error_response(payload, -2, "Amount mismatch", record["id"])
+
+    result = await mark_payment_paid(invoice_id)
+    status = result.get("status") if isinstance(result, dict) else None
+    ok = status == "paid"
+    await log_callback("click_complete_result", {**payload, "status": status}, ok)
+
+    if ok and isinstance(result, dict):
+        start_iso = result.get("sub_start") or result.get("paid_at") or datetime.now(LOCAL_TZ).isoformat()
+        end_iso = result.get("sub_end")
+        if not end_iso:
+            end_dt = _parse_iso(start_iso) + timedelta(days=SUBSCRIPTION_DAYS)
+            end_iso = end_dt.isoformat()
+        await _notify_subscription(result.get("user_id"), start_iso, end_iso)
+        return _click_success_response(payload, record["id"])
+
+    return _click_error_response(payload, -9, "Failed to confirm", record.get("id"))
 
 
 async def _read_payload(request: Request) -> Dict[str, Any]:
