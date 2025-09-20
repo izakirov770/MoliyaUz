@@ -184,9 +184,17 @@ async def update_user_subscription_fields(user_id: int, start_iso: str, end_iso:
             "INSERT INTO users(user_id) VALUES(?) ON CONFLICT(user_id) DO NOTHING",
             (user_id,),
         )
+        cur = await db.execute("PRAGMA table_info(users)")
+        cols = {row[1] for row in await cur.fetchall()}
+        if "sub_reminder_sent" in cols:
+            reminder_sql = "sub_reminder_sent=0"
+        elif "sub_reminder_sent_date" in cols:
+            reminder_sql = "sub_reminder_sent_date=NULL"
+        else:
+            reminder_sql = None
         await db.execute(
-            "UPDATE users SET sub_started_at=?, sub_until=?, sub_reminder_sent=0 WHERE user_id=?",
-            (start_iso, end_iso, user_id),
+            f"UPDATE users SET sub_started_at=?, sub_until=?{', ' + reminder_sql if reminder_sql else ''} WHERE user_id=?",
+            (start_iso, end_iso, user_id) if reminder_sql else (start_iso, end_iso, user_id),
         )
         await db.commit()
 
