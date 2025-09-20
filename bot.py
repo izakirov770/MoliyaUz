@@ -1434,6 +1434,61 @@ async def on_text(m:Message):
         if t==T("btn_lang"):
             STEP[uid]="lang"; await m.answer(T("lang_again"), reply_markup=kb_lang()); return
 
+        if t==T("rep_tx"):
+            nav_push(uid, "report_range")
+            await m.answer(T("report_main"), reply_markup=kb_rep_range(lang)); return
+
+        if t==T("rep_debts"):
+            nav_push(uid, "report_debts")
+            debts=list(reversed(MEM_DEBTS.get(uid,[])))[:10]
+            if not debts:
+                await m.answer(T("rep_empty"), reply_markup=kb_rep_main(lang)); return
+            for it in debts:
+                txt=debt_card(it, lang)
+                if it["status"]=="wait":
+                    await m.answer(txt, reply_markup=kb_debt_done(it["direction"],it["id"], lang))
+                else:
+                    await m.answer(txt)
+            return
+
+        if t in {T("rep_day"), T("rep_week"), T("rep_month"), T("rep_range_custom")}:  # type: ignore[arg-type]
+            if t == T("rep_range_custom"):
+                STEP[uid] = "report_range_start"
+                REPORT_RANGE_STATE.pop(uid, None)
+                await m.answer(T("rep_range_start"), reply_markup=kb_input_entry(lang))
+                return
+
+            kind_map = {
+                T("rep_day"): "day",
+                T("rep_week"): "week",
+                T("rep_month"): "month",
+            }
+            kind_key = kind_map.get(t)
+            if not kind_key:
+                await m.answer(T("error_generic"), reply_markup=kb_rep_main(lang)); return
+            since, until = report_range(kind_key)
+            items=[it for it in MEM_TX.get(uid,[]) if since<=it["ts"]<=until]
+            if not items:
+                await m.answer(T("rep_empty"), reply_markup=kb_rep_main(lang)); return
+            lines=[]
+            for it in items:
+                lines.append(
+                    T(
+                        "rep_line",
+                        date=fmt_date(it["ts"]),
+                        kind=(
+                            "Kirim"
+                            if it["kind"]=="income"
+                            else ("Расход" if lang=="ru" else "Chiqim")
+                        ),
+                        cat=it["category"],
+                        amount=fmt_amount(it["amount"]),
+                        cur=it["currency"],
+                    )
+                )
+            await m.answer("\n".join(lines), reply_markup=kb_rep_main(lang))
+            return
+
         if t==T("debt_mine"):
             if not has_access(uid):
                 await send_expired_notice(uid, lang, m.answer)
