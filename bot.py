@@ -1986,11 +1986,15 @@ async def send_balance(uid:int, m:Message):
         amt = d["amount"]
         cur = d.get("currency","UZS")
         if d["direction"]=="given":
-            they_uzs += amt if cur=="UZS" else amt*USD_UZS
-            they_usd += amt if cur=="USD" else amt/USD_UZS
+            if cur == "USD":
+                they_usd += amt
+            else:
+                they_uzs += amt
         else:
-            i_uzs += amt if cur=="UZS" else amt*USD_UZS
-            i_usd += amt if cur=="USD" else amt/USD_UZS
+            if cur == "USD":
+                i_usd += amt
+            else:
+                i_uzs += amt
 
     lang=get_lang(uid); T=L(lang)
     txt=T("balance",
