@@ -1880,7 +1880,7 @@ async def analiz_cmd(m: Message):
     await m.answer(T("menu"), reply_markup=get_main_menu(lang))
 
 # ------ OBUNA (CLICK flow) ------
-def create_click_link(pid:str, amount:int)->str:
+def create_click_link(pid: str, amount: int) -> str:
     params = (
         f"merchant_id={CLICK_MERCHANT_ID}"
         f"&service_id={CLICK_SERVICE_ID}"
@@ -1888,8 +1888,9 @@ def create_click_link(pid:str, amount:int)->str:
         f"&transaction_param={pid}"
         f"&amount={amount}"
     )
-    if PAYMENT_RETURN_URL:
-        params += f"&return_url={quote_plus(PAYMENT_RETURN_URL)}"
+    return_url = PAYMENT_RETURN_URL or RETURN_URL
+    if return_url:
+        params += f"&return_url={quote_plus(return_url)}"
     return f"{CLICK_PAY_URL_BASE}?{params}"
 
 
