@@ -12,7 +12,6 @@ from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from zoneinfo import ZoneInfo
 from urllib.parse import urlencode, quote
-import sqlite3
 
 from payments import (
     ensure_schema as ensure_payment_schema,
@@ -20,7 +19,6 @@ from payments import (
     log_callback,
     mark_payment_paid,
 )
-from bot.services.activate import activate_invoice
 from db import DB_PATH
 
 load_dotenv()
@@ -51,6 +49,26 @@ app = FastAPI()
 app.mount("/clickpay", StaticFiles(directory="clickpay"), name="clickpay")
 
 
+async def _ensure_user_columns_async() -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("PRAGMA table_info(users)")
+        cols = {row[1] for row in await cur.fetchall()}
+        statements = []
+        if "sub_started_at" not in cols:
+            statements.append("ALTER TABLE users ADD COLUMN sub_started_at TIMESTAMP")
+        if "sub_until" not in cols:
+            statements.append("ALTER TABLE users ADD COLUMN sub_until TIMESTAMP")
+        if "sub_reminder_sent" not in cols and "sub_reminder_sent_date" not in cols:
+            statements.append("ALTER TABLE users ADD COLUMN sub_reminder_sent INTEGER DEFAULT 0")
+        for stmt in statements:
+            try:
+                await db.execute(stmt)
+            except Exception:
+                pass
+        if statements:
+            await db.commit()
+
+
 @app.get("/clickpay/pay")
 def clickpay_pay(
     amount: int = Query(..., ge=1),
@@ -76,40 +94,16 @@ def clickpay_pay(
     return RedirectResponse(url, status_code=302)
 
 
-def _db():
-    return sqlite3.connect(os.getenv("DB_PATH", "moliya.db"))
-
-
-def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
-    cur = conn.execute(f"PRAGMA table_info({table})")
-    cols = [row[1] for row in cur.fetchall()]
-    if column not in cols:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
-
-
 @app.get("/payments/return")
-def payments_return(invoice_id: str):
-    conn = _db()
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS payments(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id BIGINT,
-            invoice_id TEXT UNIQUE,
-            amount NUMERIC,
-            currency TEXT DEFAULT 'UZS',
-            status TEXT DEFAULT 'pending',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            paid_at TIMESTAMP
-        )
-        """
-    )
-    _ensure_column(conn, "users", "sub_started_at", "TIMESTAMP")
-    _ensure_column(conn, "users", "sub_until", "TIMESTAMP")
-    _ensure_column(conn, "users", "sub_reminder_sent_date", "DATE")
-    conn.close()
+async def payments_return(invoice_id: str):
+    try:
+        await ensure_payment_schema()
+        await _ensure_user_columns_async()
+        record = await mark_payment_paid(invoice_id)
+    except Exception:
+        record = None
 
-    ok = activate_invoice(invoice_id)
+    ok = bool(record and record.get("status") == "paid")
     if not ok:
         return HTMLResponse(ERROR_PAGE, status_code=404)
 
