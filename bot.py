@@ -5,7 +5,7 @@ from decimal import Decimal
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlencode, urlparse, urlunparse, parse_qsl
 from typing import Optional, Dict, List, Tuple, Any
 
 from aiogram import Bot, Dispatcher, F, Router, BaseMiddleware
@@ -1938,7 +1938,14 @@ def _build_return_url(invoice_id: str) -> Optional[str]:
     template = PAYMENT_RETURN_URL or RETURN_URL
     if not template:
         return None
-    return template.replace("<invoice_id>", invoice_id)
+    if "<invoice_id>" in template:
+        return template.replace("<invoice_id>", invoice_id)
+    parsed = urlparse(template)
+    query = dict(parse_qsl(parsed.query)) if parsed.query else {}
+    if "invoice_id" not in query:
+        query["invoice_id"] = invoice_id
+    new_query = urlencode(query)
+    return urlunparse(parsed._replace(query=new_query))
 
 
 def create_click_link(pid: str, amount: int) -> str:
