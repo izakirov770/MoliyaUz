@@ -1819,14 +1819,23 @@ async def analiz_cmd(m: Message):
     cats_text = "\n".join(cat_lines) if cat_lines else ("• Hali sarf yozuvlari yo‘q" if lang=="uz" else "• Расходов пока нет")
 
     if balance_uzs > 0:
-        motiv = "👏 A'lo! Bu oy daromad sarflardan yuqori. Intizomga 5 baho — jamg‘arma o‘smoqda! 💹" if lang=="uz" else \
-                "👏 Отлично! В этом месяце доход выше расходов. Дисциплина — огонь, сбережения растут! 💹"
+        motiv = (
+            "👏 Zo‘r! Daromad chiqimdan yuqori — jamg‘arma o‘smoqda. Shu zaylda davom eting! 💹"
+            if lang == "uz"
+            else "👏 Отлично! Доход выше расходов — сбережения растут, держите темп! 💹"
+        )
     elif balance_uzs < 0:
-        motiv = "⚠️ E'tiborli bo‘laylik: bu oy chiqim daromaddan oshib ketdi. Keyingi oy maqsad — sarfni biroz qisqartirib, kichik jamg‘arma boshlash! ✅" if lang=="uz" else \
-                "⚠️ Внимательнее: в этом месяце расходы превысили доход. Цель на следующий — немного ужаться и начать подушку! ✅"
+        motiv = (
+            "⚠️ Diqqat: bu oy chiqim daromaddan ko‘p. Keyingi oy kichik tejamkorlik rejasi tuzing. ✅"
+            if lang == "uz"
+            else "⚠️ Внимательнее: в этом месяце расходы превысили доход. Сократите траты и выровняйте баланс. ✅"
+        )
     else:
-        motiv = "🙂 Balans nolga yaqin. Yaxshi start! Endi har kuni mayda tejamkorlik bilan jamg‘armani yo‘lga qo‘ysak bo‘ladi." if lang=="uz" else \
-                "🙂 Баланс около нуля. Хорошее начало! Понемногу экономим ежедневно — и пойдут сбережения."
+        motiv = (
+            "🙂 Balans nolga teng — yaxshi start. Endi har kungi mayda tejash bilan jamg‘arma boshlang."
+            if lang == "uz"
+            else "🙂 Баланс около нуля — хороший старт. Пора понемногу откладывать на подушку."
+        )
 
     text = (
         ( "<b>📊 1 oylik moliya analizi</b>\n\n"
