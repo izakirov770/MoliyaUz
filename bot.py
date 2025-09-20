@@ -614,7 +614,9 @@ def t_uz(k,**kw):
         "debt_saved_given":"💸 Qarz (Qarzdor) qo‘shildi:\nKim: {who}\nSumma: {cur} {amount}\nQaytarish sanasi: {due}",
         "debt_need":"Qarz matnini tushunmadim. Ism va summani yozing.",
         "date_need":"Sanani tushunmadim. Masalan: 25.09.2025 yoki ertaga.",
-        "card_debt":"— — —\n<b>QARZ</b>\nSana: {created}\nKim: {who}\nKategoriya: 💳 Qarzlar\nSumma: {cur} {amount}\nBerilgan sana: {created}\nQaytadigan sana: {due}\nHolati: {status}",
+        "card_debt":"— — —\n<b>QARZ</b>\nSana: {created}\nKim: {who}\nKategoriya: 💳 Qarzlar\nSumma: {cur} {amount}\nYo'nalish: {direction}\nBerilgan sana: {created}\nQaytadigan sana: {due}\nHolati: {status}",
+        "debt_dir_mine":"Qarz olindi",
+        "debt_dir_given":"Qarz berildi",
         "st_wait":"⏳ Kutilmoqda","st_paid":"✅ Tulangan","st_rcv":"✅ Qaytarilgan",
         "btn_paid":"✅ Tuladim","btn_rcv":"✅ Berildi",
 
@@ -757,7 +759,9 @@ def t_ru(k, **kw):
         "debt_saved_given": "💸 Добавлен должник:\nКто: {who}\nСумма: {cur} {amount}\nДата возврата: {due}",
         "debt_need": "Не понял долг. Укажите имя и сумму.",
         "date_need": "Не понял дату. Например: 25.09.2025 или завтра.",
-        "card_debt": "— — —\n<b>ДОЛГ</b>\nСоздано: {created}\nКто/Кому: {who}\nКатегория: 💳 Долги\nСумма: {cur} {amount}\nДата выдачи: {created}\nДата возврата: {due}\nСтатус: {status}",
+        "card_debt": "— — —\n<b>ДОЛГ</b>\nСоздано: {created}\nКто/Кому: {who}\nКатегория: 💳 Долги\nСумма: {cur} {amount}\nНаправление: {direction}\nДата выдачи: {created}\nДата возврата: {due}\nСтатус: {status}",
+        "debt_dir_mine": "Долг взяли",
+        "debt_dir_given": "Долг выдали",
         "st_wait": "⏳ Ожидается", "st_paid": "✅ Оплачен", "st_rcv": "✅ Возвращен",
         "btn_paid": "✅ Оплатил", "btn_rcv": "✅ Вернул",
 
@@ -1166,8 +1170,10 @@ async def save_debt(uid:int, direction:str, amount:int, currency:str, counterpar
 def debt_card(it:dict, lang="uz")->str:
     T=L(lang)
     s={"wait":T("st_wait"),"paid":T("st_paid"),"received":T("st_rcv")}[it.get("status","wait")]
+    direction_key = "debt_dir_given" if it.get("direction") == "given" else "debt_dir_mine"
+    dir_label = T(direction_key)
     return T("card_debt", created=fmt_date(it["ts"]), who=it["counterparty"], cur=it.get("currency","UZS"),
-             amount=fmt_amount(it["amount"]), due=it["due"], status=s)
+             amount=fmt_amount(it["amount"]), due=it["due"], status=s, direction=dir_label)
 
 # ====== REPORT HELPERS ======
 def report_range(kind:str):
