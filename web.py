@@ -93,11 +93,12 @@ def _click_success_response(payload: Dict[str, Any], prepare_id: int) -> JSONRes
 def clickpay_pay(
     amount: int = Query(..., ge=1),
     invoice_id: str = Query(..., min_length=3),
-    card_type: Optional[str] = Query(None)
+    card_type: Optional[str] = Query(None),
+    return_url: Optional[str] = Query(None)
 ):
     base = os.getenv("WEB_BASE", "") or ""
     base_clean = base.rstrip("/")
-    return_target = f"{base_clean}/payments/return?invoice_id={quote(invoice_id, safe='')}"
+    return_target = return_url or f"{base_clean}/payments/return?invoice_id={quote(invoice_id, safe='')}"
     params = {
         "service_id": os.getenv("CLICK_SERVICE_ID", ""),
         "merchant_id": os.getenv("CLICK_MERCHANT_ID", ""),
@@ -183,22 +184,26 @@ async def click_prepare(request: Request) -> JSONResponse:
     payload = await _read_payload(request)
     await log_callback("click_prepare", payload, False)
 
-    await ensure_payment_schema()
+    try:
+        await ensure_payment_schema()
 
-    err = _validate_click_payload(payload)
-    if err:
-        return _click_error_response(payload, -4, err)
+        err = _validate_click_payload(payload)
+        if err:
+            return _click_error_response(payload, -4, err)
 
-    invoice_id = _extract_invoice_id(payload)
-    record = await _fetch_invoice(invoice_id)
-    if not record:
-        return _click_error_response(payload, -5, "Invoice not found")
+        invoice_id = _extract_invoice_id(payload)
+        record = await _fetch_invoice(invoice_id)
+        if not record:
+            return _click_error_response(payload, -5, "Invoice not found")
 
-    if not await _verify_amount(payload, record):
-        return _click_error_response(payload, -2, "Amount mismatch", record["id"])
+        if not await _verify_amount(payload, record):
+            return _click_error_response(payload, -2, "Amount mismatch", record["id"])
 
-    await log_callback("click_prepare_ok", payload, True)
-    return _click_success_response(payload, record["id"])
+        await log_callback("click_prepare_ok", payload, True)
+        return _click_success_response(payload, record["id"])
+    except Exception as exc:
+        await log_callback("click_prepare_exception", {**payload, "exception": str(exc)}, False)
+        return _click_error_response(payload, -9, "Internal error")
 
 
 @app.post("/click/complete")
@@ -206,35 +211,39 @@ async def click_complete(request: Request) -> JSONResponse:
     payload = await _read_payload(request)
     await log_callback("click_complete", payload, False)
 
-    await ensure_payment_schema()
+    try:
+        await ensure_payment_schema()
 
-    err = _validate_click_payload(payload)
-    if err:
-        return _click_error_response(payload, -4, err)
+        err = _validate_click_payload(payload)
+        if err:
+            return _click_error_response(payload, -4, err)
 
-    invoice_id = _extract_invoice_id(payload)
-    record = await _fetch_invoice(invoice_id)
-    if not record:
-        return _click_error_response(payload, -5, "Invoice not found")
+        invoice_id = _extract_invoice_id(payload)
+        record = await _fetch_invoice(invoice_id)
+        if not record:
+            return _click_error_response(payload, -5, "Invoice not found")
 
-    if not await _verify_amount(payload, record):
-        return _click_error_response(payload, -2, "Amount mismatch", record["id"])
+        if not await _verify_amount(payload, record):
+            return _click_error_response(payload, -2, "Amount mismatch", record["id"])
 
-    result = await mark_payment_paid(invoice_id)
-    status = result.get("status") if isinstance(result, dict) else None
-    ok = status == "paid"
-    await log_callback("click_complete_result", {**payload, "status": status}, ok)
+        result = await mark_payment_paid(invoice_id)
+        status = result.get("status") if isinstance(result, dict) else None
+        ok = status == "paid"
+        await log_callback("click_complete_result", {**payload, "status": status}, ok)
 
-    if ok and isinstance(result, dict):
-        start_iso = result.get("sub_start") or result.get("paid_at") or datetime.now(LOCAL_TZ).isoformat()
-        end_iso = result.get("sub_end")
-        if not end_iso:
-            end_dt = _parse_iso(start_iso) + timedelta(days=SUBSCRIPTION_DAYS)
-            end_iso = end_dt.isoformat()
-        await _notify_subscription(result.get("user_id"), start_iso, end_iso)
-        return _click_success_response(payload, record["id"])
+        if ok and isinstance(result, dict):
+            start_iso = result.get("sub_start") or result.get("paid_at") or datetime.now(LOCAL_TZ).isoformat()
+            end_iso = result.get("sub_end")
+            if not end_iso:
+                end_dt = _parse_iso(start_iso) + timedelta(days=SUBSCRIPTION_DAYS)
+                end_iso = end_dt.isoformat()
+            await _notify_subscription(result.get("user_id"), start_iso, end_iso)
+            return _click_success_response(payload, record["id"])
 
-    return _click_error_response(payload, -9, "Failed to confirm", record.get("id"))
+        return _click_error_response(payload, -9, "Failed to confirm", record.get("id"))
+    except Exception as exc:
+        await log_callback("click_complete_exception", {**payload, "exception": str(exc)}, False)
+        return _click_error_response(payload, -9, "Internal error")
 
 
 async def _read_payload(request: Request) -> Dict[str, Any]:

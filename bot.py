@@ -1880,6 +1880,13 @@ async def analiz_cmd(m: Message):
     await m.answer(T("menu"), reply_markup=get_main_menu(lang))
 
 # ------ OBUNA (CLICK flow) ------
+def _build_return_url(invoice_id: str) -> Optional[str]:
+    template = PAYMENT_RETURN_URL or RETURN_URL
+    if not template:
+        return None
+    return template.replace("<invoice_id>", invoice_id)
+
+
 def create_click_link(pid: str, amount: int) -> str:
     params = (
         f"merchant_id={CLICK_MERCHANT_ID}"
@@ -1888,7 +1895,7 @@ def create_click_link(pid: str, amount: int) -> str:
         f"&transaction_param={pid}"
         f"&amount={amount}"
     )
-    return_url = PAYMENT_RETURN_URL or RETURN_URL
+    return_url = _build_return_url(pid)
     if return_url:
         params += f"&return_url={quote_plus(return_url)}"
     return f"{CLICK_PAY_URL_BASE}?{params}"
@@ -2116,7 +2123,8 @@ async def main():
     dp.include_router(rt)
     await set_cmds()
     sample_invoice = create_invoice_id(0)
-    sample_url = build_miniapp_url(WEB_BASE, MONTH_PLAN_PRICE, sample_invoice, RETURN_URL)
+    sample_return = _build_return_url(sample_invoice) or RETURN_URL
+    sample_url = build_miniapp_url(WEB_BASE, MONTH_PLAN_PRICE, sample_invoice, sample_return)
     print("MINI_APP_URL_FOR_BOTFATHER:", MINI_APP_BASE_URL)
     print("TEST_URL_SAMPLE:", sample_url)
     asyncio.create_task(daily_reminder())
