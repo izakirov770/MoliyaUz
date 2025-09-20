@@ -39,7 +39,7 @@ except Exception:
 
 bot = Bot(BOT_TOKEN) if BOT_TOKEN else None
 
-SUCCESS_PAGE = """<!doctype html><html lang=\"uz\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>To'lov tasdiqlandi</title><style>body{font-family:'Segoe UI',Arial,sans-serif;background:#0f172a;color:#f8fafc;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:16px;}main{max-width:360px;text-align:center;background:#111c34;border-radius:18px;padding:32px 28px;box-shadow:0 20px 45px rgba(15,23,42,.45);}h1{font-size:24px;margin-bottom:12px;}p{margin:0 0 18px;line-height:1.5;color:#cbd5f5;}a.button{display:inline-flex;align-items:center;justify-content:center;padding:12px 20px;border-radius:999px;background:#38bdf8;color:#0f172a;text-decoration:none;font-weight:600;}a.button:hover{background:#0ea5e9;}small{display:block;margin-top:18px;font-size:12px;color:#64748b;}svg{width:60px;height:60px;fill:none;stroke:#38bdf8;stroke-width:1.8;margin-bottom:16px;}</style></head><body><main><svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"9\" stroke=\"rgba(56,189,248,0.35)\" stroke-width=\"2\"/><path d=\"M8.5 12.5l2.3 2.4 4.7-5.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg><h1>To'lov tasdiqlandi ✅</h1><p>Telegram botga qayting va ilovadagi oynani yoping. Obuna holatini bot avtomatik yangiladi.</p>__BUTTON__<small>Agar Telegram o'zi yopilmasa, ushbu oynani yopib botga qayting.</small></main><script>const target='__REDIRECT__';try{if(window.Telegram&&window.Telegram.WebApp){window.Telegram.WebApp.close();}}catch(e){}if(target){setTimeout(()=>{window.location.href=target;},1200);}</script></body></html>"""
+SUCCESS_PAGE = """<!doctype html><html lang=\"uz\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>To'lov tasdiqlandi</title><meta http-equiv=\"refresh\" content=\"0;url=__DEEPLINK__\"><style>body{font-family:'Segoe UI',Arial,sans-serif;background:#0f172a;color:#f8fafc;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:16px;}main{max-width:360px;text-align:center;background:#111c34;border-radius:18px;padding:32px 28px;box-shadow:0 20px 45px rgba(15,23,42,.45);}h1{font-size:24px;margin-bottom:12px;}p{margin:0 0 18px;line-height:1.5;color:#cbd5f5;}a.button{display:inline-flex;align-items:center;justify-content:center;padding:12px 20px;border-radius:999px;background:#38bdf8;color:#0f172a;text-decoration:none;font-weight:600;}a.button:hover{background:#0ea5e9;}small{display:block;margin-top:18px;font-size:12px;color:#64748b;}svg{width:60px;height:60px;fill:none;stroke:#38bdf8;stroke-width:1.8;margin-bottom:16px;}</style></head><body><main><svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"9\" stroke=\"rgba(56,189,248,0.35)\" stroke-width=\"2\"/><path d=\"M8.5 12.5l2.3 2.4 4.7-5.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg><h1>To'lov tasdiqlandi ✅</h1><p>Telegram botga qayting va ilovadagi oynani yoping. Obuna holatini bot avtomatik yangiladi.</p>__BUTTON__<small>Agar Telegram o'zi yopilmasa, bot havolasini oching.</small></main><script>(function(){const tgLink='__DEEPLINK__';const webLink='__REDIRECT__';try{if(window.Telegram&&window.Telegram.WebApp){window.Telegram.WebApp.close();}}catch(e){}if(tgLink){setTimeout(()=>{window.location.href=tgLink;},150);}if(webLink){setTimeout(()=>{window.location.href=webLink;},1500);}})();</script></body></html>"""
 
 ERROR_PAGE = """<!doctype html><html lang=\"uz\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>To'lov topilmadi</title><style>body{font-family:'Segoe UI',Arial,sans-serif;background:#0f172a;color:#f8fafc;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:16px;}main{max-width:360px;text-align:center;background:#111c34;border-radius:18px;padding:32px 28px;box-shadow:0 20px 45px rgba(15,23,42,.45);}h1{font-size:24px;margin-bottom:12px;}p{margin:0;line-height:1.5;color:#cbd5f5;}</style></head><body><main><h1>To'lov topilmadi 😕</h1><p>Invoice ID noto'g'ri yoki allaqachon tasdiqlangan. Telegramga qaytib, botdan so'rov yuboring.</p></main></body></html>"""
 
@@ -110,15 +110,18 @@ async def payments_return(invoice_id: str):
     bot_username = (os.getenv("BOT_USERNAME", "") or "").lstrip("@")
     button_html = ""
     redirect_url = ""
+    deeplink_url = "about:blank"
     if bot_username:
         bot_link = f"https://t.me/{bot_username}"
+        deeplink_url = f"tg://resolve?domain={bot_username}"
         button_html = (
             f"<a class=\"button\" href=\"{bot_link}\" target=\"_blank\">Botga qaytish</a>"
         )
         redirect_url = bot_link
 
     html = SUCCESS_PAGE.replace("__BUTTON__", button_html)
-    html = html.replace("__REDIRECT__", redirect_url)
+    html = html.replace("__REDIRECT__", redirect_url or "")
+    html = html.replace("__DEEPLINK__", deeplink_url)
     return HTMLResponse(html)
 
 
