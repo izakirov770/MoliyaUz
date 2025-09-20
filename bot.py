@@ -26,6 +26,7 @@ from payments import (
     detect_plan as payments_detect_plan,
     ensure_schema as ensure_payment_schema,
     get_latest_payment as payments_get_latest_payment,
+    mark_payment_paid as payments_mark_payment_paid,
 )
 from services.payments import create_invoice_id, build_miniapp_url
 
@@ -97,6 +98,52 @@ fmt_date = lambda d: d.strftime("%d.%m.%Y")
 def fmt_amount(n):
     try: return f"{int(round(n)):,}".replace(",", " ")
     except: return str(n)
+
+
+async def handle_paid_deeplink(uid: int, payload: str, message: Message) -> bool:
+    if not payload or not payload.startswith("paid_"):
+        return False
+    invoice_id = payload[5:].strip()
+    if not invoice_id:
+        return False
+
+    lang = get_lang(uid)
+    T = L(lang)
+
+    record = await payments_mark_payment_paid(invoice_id)
+    if not record:
+        await message.answer(T("pay_status_missing"))
+        await message.answer(T("menu"), reply_markup=get_main_menu(lang))
+        STEP[uid] = "main"
+        return True
+
+    owner_id = record.get("user_id")
+    if owner_id and owner_id != uid:
+        await ensure_subscription_state(owner_id)
+        await message.answer(T("pay_status_missing"))
+        await message.answer(T("menu"), reply_markup=get_main_menu(lang))
+        STEP[uid] = "main"
+        return True
+
+    await ensure_subscription_state(uid)
+
+    amount_dec = Decimal(str(record.get("amount", "0") or "0"))
+    plan_info = payments_detect_plan(amount_dec)
+    plan_key = plan_info[0] if plan_info else None
+    plan_label = L(lang)(plan_key) if plan_key else f"{fmt_amount(int(amount_dec))} UZS"
+
+    start_dt = _parse_dt(record.get("sub_start")) if record.get("sub_start") else None
+    end_dt = _parse_dt(record.get("sub_end")) if record.get("sub_end") else None
+    until_text = fmt_date(end_dt) if end_dt else "—"
+
+    await message.answer(T("pay_status_paid", plan=plan_label, until=until_text))
+    if start_dt and end_dt:
+        await message.answer(T("sub_ok", start=fmt_date(start_dt), end=fmt_date(end_dt)))
+    await message.answer(T("SUB_OK"))
+
+    STEP[uid] = "main"
+    await message.answer(T("menu"), reply_markup=get_main_menu(lang))
+    return True
 
 # ====== “DB” (RAM) ======
 STEP: Dict[int,str] = {}
@@ -1247,6 +1294,13 @@ async def start(m:Message):
     TRIAL_START.setdefault(uid, now_tk())
     await ensure_month_rollover()
     nav_reset(uid)
+    payload = ""
+    if m.text:
+        parts = m.text.split(maxsplit=1)
+        if len(parts) > 1:
+            payload = parts[1].strip()
+    if await handle_paid_deeplink(uid, payload, m):
+        return
     STEP[uid]="lang"
     await m.answer(t_uz("start_choose"), reply_markup=kb_lang())
 
