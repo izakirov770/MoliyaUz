@@ -105,20 +105,12 @@ async def check_click_status(merchant_trans_id: str) -> Dict[str, Any]:
                 is_paid = True
 
             logger.info(
-                "click-status",
-                extra={
-                    "merchant_trans_id": merchant_trans_id,
-                    "status_code": response.status_code,
-                    "status": status_value,
-                },
+                "click-status merchant_trans_id=%s status=%s code=%s",
+                merchant_trans_id,
+                status_value,
+                response.status_code,
             )
-            logger.info(
-                "click-status-payload",
-                extra={
-                    "merchant_trans_id": merchant_trans_id,
-                    "payload": data,
-                },
-            )
+            logger.info("click-status payload=%s", data)
             return {
                 "paid": is_paid,
                 "payload": data,
