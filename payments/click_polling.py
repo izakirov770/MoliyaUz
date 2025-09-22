@@ -95,13 +95,14 @@ async def check_click_status(merchant_trans_id: str) -> Dict[str, Any]:
             except Exception:
                 data = {"raw": response.text}
 
-            status_value = str(
-                data.get("status")
-                or data.get("payment_status")
-                or data.get("status_note")
-                or ""
-            ).lower()
-            is_paid = status_value in {"paid", "success", "successfully_pay", "completed"}
+            status_raw = data.get("status") or data.get("payment_status")
+            note_raw = data.get("status_note") or data.get("error_note")
+            status_value = str(status_raw or note_raw or "").strip().lower()
+            is_paid = False
+            if status_value in {"paid", "success", "successfully_pay", "completed", "200"}:
+                is_paid = True
+            elif any(token in status_value for token in ["оплачен", "успешн", "оплата прошла"]):
+                is_paid = True
 
             logger.info(
                 "click-status",

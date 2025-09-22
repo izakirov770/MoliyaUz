@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import uuid
@@ -179,11 +180,23 @@ async def on_check_subscription(callback: types.CallbackQuery):
             await callback.answer()
             return
         merchant_trans_id = record.get("invoice_id")
-    check_result = await check_click_status(merchant_trans_id)
+    attempts = 3
+    delay_seconds = 2
+    check_result = {}
+    for attempt in range(attempts):
+        check_result = await check_click_status(merchant_trans_id)
+        if check_result.get("status") == "error" and check_result.get("error"):
+            break
+        if check_result.get("paid"):
+            break
+        if attempt < attempts - 1:
+            await asyncio.sleep(delay_seconds)
+
     if check_result.get("status") == "error" and check_result.get("error"):
         await callback.message.answer("Hozir tekshirib bo‘lmadi, birozdan so‘ng urinib ko‘ring.")
         await callback.answer()
         return
+
     if not check_result.get("paid"):
         await callback.message.answer(
             "To‘lov topilmadi. Agar to‘lagan bo‘lsangiz, yana ‘Davom etish’ni bosing.",
@@ -191,6 +204,7 @@ async def on_check_subscription(callback: types.CallbackQuery):
         )
         await callback.answer()
         return
+
     data = check_result.get("payload") or {}
     status = check_result.get("status", "")
     record = await get_payment_by_invoice(merchant_trans_id)
