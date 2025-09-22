@@ -1121,6 +1121,51 @@ async def handle_back_button(m: Message, uid: int, lang: str) -> None:
     await show_navigation_state(uid, lang, state, m)
 
 # ====== PARSERLAR ======
+MULTI_AMOUNT_TOKEN_RE = re.compile(
+    r"(?:(?:\d+[.,]?\d*)\s*(?:mln|million|млн|ming|min|тыс|k)\b|\b\d+\b)",
+    re.IGNORECASE,
+)
+MULTI_LETTER_RE = re.compile(r"[A-Za-z\u0400-\u04FF]")
+
+
+def split_tx_entries(text: str) -> list[str]:
+    """Split text into transaction-sized chunks using detected amount tokens."""
+    raw = (text or "").strip()
+    if not raw:
+        return [raw]
+
+    matches = list(MULTI_AMOUNT_TOKEN_RE.finditer(raw))
+    if len(matches) <= 1:
+        return [raw]
+
+    segments: list[str] = []
+    segment_start = 0
+    prev_end = matches[0].end()
+    for match in matches[1:]:
+        between = raw[prev_end:match.start()]
+        has_words = bool(MULTI_LETTER_RE.search(between))
+        has_split_char = any(ch in between for ch in ("\n", ",", ";", "/", "|"))
+        if has_words or has_split_char:
+            segment = raw[segment_start:prev_end].strip()
+            if segment:
+                segments.append(segment)
+            segment_start = prev_end
+        prev_end = match.end()
+
+    last_segment = raw[segment_start:prev_end].strip()
+    if last_segment:
+        segments.append(last_segment)
+
+    tail = raw[prev_end:].strip()
+    if tail:
+        if segments:
+            segments[-1] = f"{segments[-1]} {tail}".strip()
+        else:
+            segments.append(tail)
+
+    return segments or [raw]
+
+
 def parse_amount(text:str)->Optional[int]:
     t=(text or "").lower().replace("’","'").strip()
     m=re.search(r"\b(\d+[.,]?\d*)\s*(mln|million|млн)\b",t)
@@ -1623,6 +1668,52 @@ async def on_text(m:Message):
             STEP[uid] = "debt_mine_due" if kind_label == "debt_mine" else "debt_given_due"
             await m.answer(T("ask_due_mine") if kind_label == "debt_mine" else T("ask_due_given"))
 
+        async def handle_basic_entry(entry_text: str) -> bool:
+            entry = entry_text.strip()
+            if not entry:
+                return False
+
+            entry_kind = guess_kind(entry)
+            if entry_kind in ("debt_mine", "debt_given"):
+                await m.answer(T("need_sum"))
+                return False
+
+            amount_val = parse_amount(entry)
+            if amount_val is None:
+                await m.answer(T("need_sum"))
+                return False
+
+            curr_val = detect_currency(entry)
+            acc_val = detect_account(entry)
+
+            if entry_kind == "income":
+                title = "💪 Mehnat daromadlari" if lang == "uz" else "💪 Доход от труда"
+                await save_tx(uid, "income", amount_val, curr_val, acc_val, title, entry)
+                await m.answer(
+                    T(
+                        "tx_inc",
+                        date=fmt_date(now_tk()),
+                        cur=curr_val,
+                        amount=fmt_amount(amount_val),
+                        desc=entry,
+                    )
+                )
+            else:
+                cat_val = guess_category(entry)
+                await save_tx(uid, "expense", amount_val, curr_val, acc_val, cat_val, entry)
+                await m.answer(
+                    T(
+                        "tx_exp",
+                        date=fmt_date(now_tk()),
+                        cur=curr_val,
+                        amount=fmt_amount(amount_val),
+                        cat=cat_val,
+                        desc=entry,
+                    )
+                )
+
+            return True
+
         # hisobla input
         if step=="input_tx":
             if not has_access(uid):
@@ -1639,6 +1730,19 @@ async def on_text(m:Message):
                 return
             await handle_debt(kind)
             return
+
+        multi_entries = split_tx_entries(t)
+        if len(multi_entries) > 1:
+            filtered_entries = [entry for entry in multi_entries if entry.strip()]
+            if filtered_entries and all(guess_kind(entry) not in ("debt_mine", "debt_given") for entry in filtered_entries):
+                processed_any = False
+                for chunk in filtered_entries:
+                    ok = await handle_basic_entry(chunk)
+                    if not ok:
+                        return
+                    processed_any = True
+                if processed_any:
+                    return
 
         amount=parse_amount(t)
         if amount is None: await m.answer(T("need_sum")); return
