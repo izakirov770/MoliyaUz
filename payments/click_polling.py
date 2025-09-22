@@ -15,7 +15,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-CLICK_POLLING_ENABLED = os.getenv("ENABLE_CLICK_POLLING", "false").lower() in {"1", "true", "yes"}
+CLICK_POLLING_ENABLED = os.getenv("ENABLE_CLICK_POLLING", "true").lower() in {"1", "true", "yes"}
 
 CLICK_BASE_PAY_URL = os.getenv("CLICK_BASE_PAY_URL", "https://my.click.uz/services/pay")
 CLICK_STATUS_URL = os.getenv(
@@ -30,8 +30,8 @@ CLICK_SECRET_KEY = os.getenv("CLICK_SECRET_KEY", "")
 PLAN_WEEK_KEY = os.getenv("CLICK_PLAN_WEEKLY_KEY", "weekly_1")
 PLAN_MONTH_KEY = os.getenv("CLICK_PLAN_MONTHLY_KEY", "monthly_1")
 
-RAW_WEEK_AMOUNT = os.getenv("CLICK_AMOUNT_WEEK") or os.getenv("WEEK_PRICE", "0")
-RAW_MONTH_AMOUNT = os.getenv("CLICK_AMOUNT_MONTH") or os.getenv("MONTH_PRICE", "0")
+RAW_WEEK_AMOUNT = os.getenv("AMOUNT_WEEK_SOM", "7900.00")
+RAW_MONTH_AMOUNT = os.getenv("AMOUNT_MONTH_SOM", "19900.00")
 
 
 def get_plan_amount(plan: str) -> str:
@@ -77,9 +77,9 @@ async def check_click_status(merchant_trans_id: str) -> Dict[str, Any]:
     timestamp = int(time.time())
     signature = hashlib.sha1(f"{timestamp}{CLICK_SECRET_KEY}".encode()).hexdigest()
     headers = {
-        "Merchant-User-Id": CLICK_MERCHANT_USER_ID or "",
-        "Authorization": signature,
-        "Timestamp": str(timestamp),
+        "merchant_user_id": CLICK_MERCHANT_USER_ID or "",
+        "sign": signature,
+        "sign_time": str(timestamp),
     }
     params = {
         "service_id": CLICK_SERVICE_ID,
@@ -90,26 +90,39 @@ async def check_click_status(merchant_trans_id: str) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             response = await client.get(CLICK_STATUS_URL, params=params, headers=headers)
-            data: Dict[str, Any]
             try:
                 data = response.json()
             except Exception:
                 data = {"raw": response.text}
+
+            status_value = str(
+                data.get("status")
+                or data.get("payment_status")
+                or data.get("status_note")
+                or ""
+            ).lower()
+            is_paid = status_value in {"paid", "success", "successfully_pay", "completed"}
+
             logger.info(
                 "click-status",
                 extra={
                     "merchant_trans_id": merchant_trans_id,
                     "status_code": response.status_code,
-                    "data_status": data.get("status"),
+                    "status": status_value,
                 },
             )
-            return {"ok": response.is_success, "status_code": response.status_code, "data": data}
+            return {
+                "paid": is_paid,
+                "payload": data,
+                "status_code": response.status_code,
+                "status": status_value,
+            }
         except httpx.RequestError as exc:
             logger.warning(
                 "click-status-error",
                 extra={"merchant_trans_id": merchant_trans_id, "error": str(exc)},
             )
-            return {"ok": False, "reason": "request_error", "error": str(exc)}
+            return {"paid": False, "error": str(exc), "status": "error", "status_code": None, "payload": {}}
 
 
 # Small helper for synchronous contexts (e.g., tests)

@@ -41,9 +41,9 @@ logger = logging.getLogger(__name__)
 # [SUBSCRIPTION-POLLING-BEGIN]
 def _plan_label(plan_key: str) -> str:
     if plan_key == PLAN_WEEK_KEY:
-        return "1 haftalik"
+        return f"1 haftalik ({_format_display_amount(get_plan_amount(plan_key))})"
     if plan_key == PLAN_MONTH_KEY:
-        return "1 oylik"
+        return f"1 oylik ({_format_display_amount(get_plan_amount(plan_key))})"
     return plan_key or "Noma'lum"
 
 
@@ -53,6 +53,14 @@ def _plan_delta(plan_key: str) -> timedelta:
     if plan_key == PLAN_MONTH_KEY:
         return timedelta(days=30)
     return timedelta(days=30)
+
+
+def _format_display_amount(amount: str) -> str:
+    try:
+        value = int(round(float(amount)))
+        return f"{value:,}".replace(",", " ")
+    except Exception:
+        return amount
 
 
 async def _send_status(message: types.Message) -> None:
@@ -121,7 +129,7 @@ async def _finalize_paid(
 ) -> datetime:
     expires_at = paid_at + _plan_delta(plan_key)
     await update_user_subscription_fields(user_id, paid_at.isoformat(), expires_at.isoformat())
-    await mark_polling_payment_paid(merchant_trans_id, payload)
+    await mark_polling_payment_paid(merchant_trans_id, payload, expires_at.isoformat())
     return expires_at
 
 
@@ -172,12 +180,19 @@ async def on_check_subscription(callback: types.CallbackQuery):
             return
         merchant_trans_id = record.get("invoice_id")
     check_result = await check_click_status(merchant_trans_id)
-    if not check_result.get("ok"):
+    if check_result.get("status") == "error" and check_result.get("error"):
         await callback.message.answer("Hozir tekshirib bo‘lmadi, birozdan so‘ng urinib ko‘ring.")
         await callback.answer()
         return
-    data = check_result.get("data") or {}
-    status = str(data.get("status") or data.get("payment_status") or "").lower()
+    if not check_result.get("paid"):
+        await callback.message.answer(
+            "To‘lov topilmadi. Agar to‘lagan bo‘lsangiz, yana ‘Davom etish’ni bosing.",
+            reply_markup=subscription_check_only_kb(merchant_trans_id),
+        )
+        await callback.answer()
+        return
+    data = check_result.get("payload") or {}
+    status = check_result.get("status", "")
     record = await get_payment_by_invoice(merchant_trans_id)
     if not record:
         await callback.message.answer("To‘lov yozuvi topilmadi.")
@@ -208,13 +223,6 @@ async def on_check_subscription(callback: types.CallbackQuery):
             await callback.message.answer("Summalarda farq bor. Administrator bilan bog‘laning.")
             await callback.answer()
             return
-    if status not in {"paid", "success", "completed", "successfully_pay"}:
-        await callback.message.answer(
-            "To‘lov topilmadi. Agar to‘lagan bo‘lsangiz, yana ‘Davom etish’ni bosing.",
-            reply_markup=subscription_check_only_kb(merchant_trans_id),
-        )
-        await callback.answer()
-        return
     paid_at_raw = data.get("perform_time") or data.get("payment_time") or data.get("paid_time")
     try:
         paid_at = datetime.fromisoformat(paid_at_raw)
@@ -228,7 +236,11 @@ async def on_check_subscription(callback: types.CallbackQuery):
         plan_key,
         paid_at,
         merchant_trans_id,
-        {"merchant_trans_id": merchant_trans_id, "status_data": data},
+        {
+            "status_code": check_result.get("status_code"),
+            "status": check_result.get("status"),
+            "payload": data,
+        },
     )
     await callback.message.answer(
         "Obuna faollashdi ✅\n"

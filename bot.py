@@ -61,6 +61,9 @@ WEB_BASE = os.getenv("WEB_BASE", "http://127.0.0.1:8000")
 RETURN_URL = os.getenv("RETURN_URL", f"{WEB_BASE.rstrip('/')}/payments/return")
 MONTH_PLAN_PRICE = int(os.getenv("MONTH_PLAN_PRICE", "19900"))
 MINI_APP_BASE_URL = f"{WEB_BASE.rstrip('/')}/clickpay/click_form.html"
+# [SUBSCRIPTION-POLLING-BEGIN]
+CLICK_INCLUDE_RETURN_URL = os.getenv("CLICK_INCLUDE_RETURN_URL", "false").lower() in {"1", "true", "yes"}
+# [SUBSCRIPTION-POLLING-END]
 
 NOTION_OFER_URL = "https://www.notion.so/OFERA-26a8fa17fd1f803f8025f07f98f89c87?source=copy_link"
 
@@ -2174,9 +2177,12 @@ def create_click_link(pid: str, amount: int) -> str:
         f"&transaction_param={pid}"
         f"&amount={amount}"
     )
-    return_url = _build_return_url(pid)
-    if return_url:
-        params += f"&return_url={quote_plus(return_url)}"
+    # [SUBSCRIPTION-POLLING-BEGIN]
+    if CLICK_INCLUDE_RETURN_URL:
+        return_url = _build_return_url(pid)
+        if return_url:
+            params += f"&return_url={quote_plus(return_url)}"
+    # [SUBSCRIPTION-POLLING-END]
     return f"{CLICK_PAY_URL_BASE}?{params}"
 
 

@@ -21,7 +21,11 @@ CREATE TABLE IF NOT EXISTS payments(
     currency TEXT,
     status TEXT DEFAULT 'pending',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    paid_at TIMESTAMP
+    paid_at TIMESTAMP,
+    plan TEXT,
+    provider TEXT,
+    raw_payload TEXT,
+    expires_at TIMESTAMP
 );
 """
 
@@ -50,11 +54,37 @@ async def ensure_schema() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(PAYMENTS_TABLE)
         await db.execute(PAYMENTS_LOGS_TABLE)
+        await _ensure_polling_columns(db)
         await db.commit()
     _schema_ready = True
 
 
 # [SUBSCRIPTION-POLLING-BEGIN]
+async def _ensure_polling_columns(db: aiosqlite.Connection) -> None:
+    cur = await db.execute("PRAGMA table_info(payments)")
+    cols = {row[1] for row in await cur.fetchall()}
+    statements = []
+    if "plan" not in cols:
+        statements.append("ALTER TABLE payments ADD COLUMN plan TEXT")
+    if "provider" not in cols:
+        statements.append("ALTER TABLE payments ADD COLUMN provider TEXT")
+    if "raw_payload" not in cols:
+        statements.append("ALTER TABLE payments ADD COLUMN raw_payload TEXT")
+    if "expires_at" not in cols:
+        statements.append("ALTER TABLE payments ADD COLUMN expires_at TIMESTAMP")
+    for stmt in statements:
+        try:
+            await db.execute(stmt)
+        except Exception:
+            pass
+
+
+async def _ensure_polling_columns_autocommit() -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _ensure_polling_columns(db)
+        await db.commit()
+
+
 async def create_polling_payment(
     user_id: int,
     merchant_trans_id: str,
@@ -63,10 +93,11 @@ async def create_polling_payment(
     currency: str = "UZS",
 ) -> Optional[Dict[str, Any]]:
     await ensure_schema()
+    await _ensure_polling_columns_autocommit()
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT INTO payments(user_id, invoice_id, amount, currency, status, plan, created_at) "
-            "VALUES(?,?,?,?, 'pending', ?, CURRENT_TIMESTAMP)",
+            "INSERT INTO payments(user_id, invoice_id, amount, currency, status, plan, provider, created_at) "
+            "VALUES(?,?,?,?, 'pending', ?, 'click', CURRENT_TIMESTAMP)",
             (user_id, merchant_trans_id, amount, currency, plan),
         )
         await db.commit()
@@ -90,8 +121,10 @@ async def get_recent_pending_payment(user_id: int) -> Optional[Dict[str, Any]]:
 async def mark_polling_payment_paid(
     merchant_trans_id: str,
     payload: Dict[str, Any],
+    expires_at_iso: str,
 ) -> Optional[Dict[str, Any]]:
     await ensure_schema()
+    await _ensure_polling_columns_autocommit()
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
@@ -110,8 +143,13 @@ async def mark_polling_payment_paid(
     paid_at_iso = datetime.now(timezone.utc).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "UPDATE payments SET status='paid', paid_at=? WHERE invoice_id=?",
-            (paid_at_iso, merchant_trans_id),
+            "UPDATE payments SET status='paid', paid_at=?, provider='click', raw_payload=?, expires_at=? WHERE invoice_id=?",
+            (
+                paid_at_iso,
+                json.dumps(payload, default=str),
+                expires_at_iso,
+                merchant_trans_id,
+            ),
         )
         await db.commit()
     await log_callback(
@@ -122,6 +160,7 @@ async def mark_polling_payment_paid(
     updated = await get_payment_by_invoice(merchant_trans_id)
     if updated:
         updated["paid_at"] = paid_at_iso
+        updated["expires_at"] = expires_at_iso
     return updated
 
 # [SUBSCRIPTION-POLLING-END]
