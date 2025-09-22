@@ -156,22 +156,30 @@ async def _record_subscription(user_id: int, invoice_id: str, plan_key: str, day
     else:
         start_dt = start_dt.astimezone(timezone.utc)
     end_dt = start_dt + timedelta(days=days)
+    start_iso = start_dt.isoformat()
+    end_iso = end_dt.isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT OR IGNORE INTO subs(user_id, plan, status, pay_id, provider, start_at, end_at) "
-            "VALUES(?,?,?,?,?,?,?)",
-            (
-                user_id,
-                plan_key,
-                "active",
-                invoice_id,
-                "click",
-                start_dt.isoformat(),
-                end_dt.isoformat(),
-            ),
+            "UPDATE subs SET plan=?, status='active', provider=?, start_at=?, end_at=? WHERE pay_id=?",
+            (plan_key, "click", start_iso, end_iso, invoice_id),
         )
+        cur = await db.execute("SELECT id FROM subs WHERE pay_id=?", (invoice_id,))
+        row = await cur.fetchone()
+        if not row:
+            await db.execute(
+                "INSERT INTO subs(user_id, plan, status, pay_id, provider, start_at, end_at) VALUES(?,?,?,?,?,?,?)",
+                (
+                    user_id,
+                    plan_key,
+                    "active",
+                    invoice_id,
+                    "click",
+                    start_iso,
+                    end_iso,
+                ),
+            )
         await db.commit()
-    return start_dt.isoformat(), end_dt.isoformat()
+    return start_iso, end_iso
 
 
 def detect_plan(amount: Decimal) -> Optional[Tuple[str, int]]:
@@ -192,10 +200,17 @@ async def update_user_subscription_fields(user_id: int, start_iso: str, end_iso:
             reminder_sql = "sub_reminder_sent_date=NULL"
         else:
             reminder_sql = None
-        await db.execute(
-            f"UPDATE users SET sub_started_at=?, sub_until=?{', ' + reminder_sql if reminder_sql else ''} WHERE user_id=?",
-            (start_iso, end_iso, user_id) if reminder_sql else (start_iso, end_iso, user_id),
-        )
+        set_parts = ["sub_started_at=?", "sub_until=?"]
+        params = [start_iso, end_iso]
+        if reminder_sql:
+            set_parts.append(reminder_sql)
+        if "activated" in cols:
+            set_parts.append("activated=1")
+        if "trial_used" in cols:
+            set_parts.append("trial_used=1")
+        sql = f"UPDATE users SET {', '.join(set_parts)} WHERE user_id=?"
+        params.append(user_id)
+        await db.execute(sql, params)
         await db.commit()
 
 

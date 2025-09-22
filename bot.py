@@ -525,10 +525,17 @@ async def set_user_subscription(uid: int, start_dt: datetime, end_dt: datetime) 
     end_local = _parse_dt(end_dt) or end_dt.astimezone(TASHKENT)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("INSERT INTO users(user_id) VALUES(?) ON CONFLICT(user_id) DO NOTHING", (uid,))
-        await db.execute(
-            "UPDATE users SET sub_started_at=?, sub_until=?, sub_reminder_sent=0 WHERE user_id=?",
-            (start_local.isoformat(), end_local.isoformat(), uid),
-        )
+        cur = await db.execute("PRAGMA table_info(users)")
+        cols = {row[1] for row in await cur.fetchall()}
+        set_parts = ["sub_started_at=?", "sub_until=?", "sub_reminder_sent=0"]
+        params = [start_local.isoformat(), end_local.isoformat()]
+        if "activated" in cols:
+            set_parts.append("activated=1")
+        if "trial_used" in cols:
+            set_parts.append("trial_used=1")
+        sql = f"UPDATE users SET {', '.join(set_parts)} WHERE user_id=?"
+        params.append(uid)
+        await db.execute(sql, params)
         await db.commit()
     SUB_STARTED[uid] = start_local
     SUB_EXPIRES[uid] = end_local
