@@ -441,7 +441,7 @@ PENDING_DEBT: Dict[int,dict] = {}
 # pid -> {"uid","plan","period_days","amount","currency","status","created"}
 PENDING_PAYMENTS: Dict[str,dict] = {}
 
-DEBT_REMIND_SENT: set[Tuple[int,int,str]] = set()
+DEBT_REMIND_SENT: set[Tuple[int,int,str,str]] = set()
 
 NAV_STACK: Dict[int, List[str]] = {}
 
@@ -664,9 +664,9 @@ def t_uz(k,**kw):
         "SUB_OK":"1 oylik obuna faollashdi ✅",
         "SUB_PENDING":"To‘lov hali tasdiqlanmagan.",
         "SUB_MISSING":"Avval to‘lov yarating.",
-        "DEBT_REMIND_TO_US":"Bugun mijoz to‘lashi kerak: {fio} — {summa} {valyuta}",
-        "DEBT_REMIND_BY_US":"Bugun siz berishingiz kerak: {kimga} — {summa} {valyuta}",
-        "DEBT_REMIND_EVENING":"Eslatma: bugun muddati: {kimga} — {summa} {valyuta}",
+        "DEBT_REMIND_TO_US":"📅 Bugun ({due}) {who} {amount} {cur} qaytarishi kerak. Nazorat qiling!",
+        "DEBT_REMIND_BY_US":"📅 Bugun ({due}) siz {who} ga {amount} {cur} to‘lashingiz kerak. Unutmang!",
+        "DEBT_REMIND_EVENING":"Eslatma: bugun muddati: {who} — {amount} {cur}",
         "bio_refresh_ok":"Bio yangilandi ✅",
 
         "debt_archive_btn":"🗂 Arxiv",
@@ -708,6 +708,8 @@ def t_uz(k,**kw):
         "sub_create_first":"Avval to‘lov yarating.",
         "error_generic":"Xatolik yuz berdi.",
 
+        "morning_ping":"🌅 Hayrli tong! Harajatlaringizni yozishni unutmang — MoliyaUz doim yoningizda.",
+        "evening_ping":"🌙 Kun qanday o‘tdi? Harajatlaringizni yozishni unutmang. Atigi 15 soniya kifoya!",
         "daily":"🕗 Bugungi xarajatlaringizni yozdingizmi? 📝",
         "lang_again":"Tilni tanlang:","enter_text":"Matn yuboring.",
 
@@ -809,9 +811,9 @@ def t_ru(k, **kw):
         "SUB_OK": "1-месячная подписка активирована ✅",
         "SUB_PENDING": "Платеж ещё не подтвержден.",
         "SUB_MISSING": "Сначала создайте платеж.",
-        "DEBT_REMIND_TO_US": "Сегодня клиент должен заплатить: {fio} — {summa} {valyuta}",
-        "DEBT_REMIND_BY_US": "Сегодня вы должны отдать: {kimga} — {summa} {valyuta}",
-        "DEBT_REMIND_EVENING": "Напоминание: сегодня дедлайн: {kimga} — {summa} {valyuta}",
+        "DEBT_REMIND_TO_US": "📅 Сегодня ({due}) {who} должен вернуть вам {amount} {cur}. Проверьте!",
+        "DEBT_REMIND_BY_US": "📅 Сегодня ({due}) вы должны отдать {who} {amount} {cur}. Не забудьте!",
+        "DEBT_REMIND_EVENING": "Напоминание: сегодня дедлайн: {who} — {amount} {cur}",
         "bio_refresh_ok": "Био обновлено ✅",
 
         "debt_archive_btn": "🗂 Архив",
@@ -853,6 +855,8 @@ def t_ru(k, **kw):
         "error_generic": "Произошла ошибка.",
         "sub_create_first": "Сначала создайте платеж.",
 
+        "morning_ping": "🌅 Доброе утро! Не забудьте записать расходы — MoliyaUz рядом.",
+        "evening_ping": "🌙 Как прошёл день? Не забудьте внести траты. Всего 15 секунд!",
         "daily": "🕗 Вы сегодня записали расходы? 📝",
         "lang_again": "Выберите язык:",
         "enter_text": "Отправьте текст.",
@@ -2430,34 +2434,76 @@ def _sec_until(h:int,mn:int=0):
     return (t-n).total_seconds()
 
 async def daily_reminder():
+    schedule = ((8, "morning_ping"), (20, "evening_ping"))
     while True:
-        try:
-            await asyncio.sleep(_sec_until(20,0))
-            for uid in list(SEEN_USERS):
-                try: await bot.send_message(uid, (t_uz if get_lang(uid)=="uz" else t_ru)("daily"))
-                except: pass
-        except: pass
+        for hour, key in schedule:
+            try:
+                await asyncio.sleep(_sec_until(hour, 0))
+                for uid in list(SEEN_USERS):
+                    lang = get_lang(uid)
+                    T = L(lang)
+                    text = T(key)
+                    try:
+                        await bot.send_message(uid, text)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         await asyncio.sleep(5)
 
 async def debt_reminder():
+    schedule = ((10, "slot_a"), (16, "slot_b"))
     while True:
-        try:
-            today=fmt_date(now_tk()); hh=now_tk().strftime("%H")
-            if hh in ("08","14"):
-                for uid,debts in list(MEM_DEBTS.items()):
+        for hour, slot_key in schedule:
+            try:
+                await asyncio.sleep(_sec_until(hour, 0))
+                now = now_tk()
+                today = fmt_date(now)
+                for key in list(DEBT_REMIND_SENT):
+                    if key[3] != today:
+                        DEBT_REMIND_SENT.remove(key)
+
+                for uid, debts in list(MEM_DEBTS.items()):
+                    if not debts:
+                        continue
+                    lang = get_lang(uid)
+                    T = L(lang)
                     for it in debts:
-                        if it["due"]==today and it["status"]=="wait":
-                            key=(uid,it["id"],hh)
-                            if key in DEBT_REMIND_SENT: continue
-                            try:
-                                if it["direction"]=="mine":
-                                    txt=f"⏰ {today} — UZS {fmt_amount(it['amount'])} to‘lashni unutmang."
-                                else:
-                                    txt=f"⏰ {today} — UZS {fmt_amount(it['amount'])} qaytarilishini tekshiring."
-                                await bot.send_message(uid, txt); DEBT_REMIND_SENT.add(key)
-                            except: pass
-        except: pass
-        await asyncio.sleep(60)
+                        if it.get("status") != "wait":
+                            continue
+                        due_raw = it.get("due")
+                        if not due_raw:
+                            continue
+                        try:
+                            due_dt = datetime.strptime(due_raw, "%d.%m.%Y").date()
+                        except Exception:
+                            continue
+                        if due_dt > now.date():
+                            continue
+                        debt_id = it.get("id")
+                        if not debt_id:
+                            continue
+                        key = (uid, debt_id, slot_key, today)
+                        if key in DEBT_REMIND_SENT:
+                            continue
+                        amount_text = fmt_amount(it.get("amount", 0))
+                        currency = it.get("currency", "UZS")
+                        who = it.get("counterparty")
+                        if not who:
+                            if it.get("direction") == "given":
+                                who = "qarzdor" if lang == "uz" else "должник"
+                            else:
+                                who = "qarz bergan kishi" if lang == "uz" else "кредитор"
+                        template = "DEBT_REMIND_TO_US" if it.get("direction") == "given" else "DEBT_REMIND_BY_US"
+                        message = T(template, due=due_raw, who=who, amount=amount_text, cur=currency)
+                        try:
+                            await bot.send_message(uid, message)
+                            DEBT_REMIND_SENT.add(key)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+        await asyncio.sleep(5)
 
 # ====== COMMANDS ======
 async def set_cmds():
