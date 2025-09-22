@@ -1206,10 +1206,23 @@ def guess_kind(text:str)->str:
     t=(text or "").lower()
     if "qarz berdim" in t or "qarzga berdim" in t or "qarz ber" in t: return "debt_given"
     if "qarz oldim" in t or "qarzga oldim" in t or "qarz ol" in t: return "debt_mine"
-    if "sotib oldim" in t or "сотиб олдим" in t: return "expense"
-    if any(w in t for w in ["kirim","кирим","oylik","maosh","маош","keldi","tushdi","oldim","келди","тушди"]): return "income"
+    if "sotib oldim" in t or "сотиб олдим" in t or "kiyim oldim" in t: return "expense"
+    expense_hints = [
+        "chiqim","xarajat","taksi","benzin","ovqat","kafe","restoran","market","kommunal","internet","telefon","ijara","arenda",
+        "kiyim","kiyim","dress","oyoq kiyim","botinka","sumka","shop","magazin","bozor","dorixona","dori","apteka"
+    ]
+    if any(w in t for w in expense_hints):
+        return "expense"
+    income_hints = [
+        "kirim","кирим","oylik","maosh","маош","keldi","tushdi","келди","тушди","stipendiya","premiya","bonus","dividend"
+    ]
+    if any(w in t for w in income_hints):
+        return "income"
+    if "oldim" in t and any(w in t for w in ["pul","oylik","maosh","bonus","premiya"]):
+        return "income"
+    if "oldim" in t:
+        return "expense"
     if t.strip().startswith("+"): return "income"
-    if any(w in t for w in ["chiqim","xarajat","taksi","benzin","ovqat","kafe","restoran","market","kommunal","internet","telefon","ijara","arenda"]): return "expense"
     if t.strip().startswith("-"): return "expense"
     return "expense"
 
@@ -2050,23 +2063,60 @@ async def analiz_cmd(m: Message):
         cat_lines.append(f"• {cat} — {fmt_amount(total)} so'm")
     cats_text = "\n".join(cat_lines) if cat_lines else ("• Hali sarf yozuvlari yo‘q" if lang=="uz" else "• Расходов пока нет")
 
-    if balance_uzs > 0:
+    has_items = bool(items)
+    gap_uzs = abs(balance_uzs)
+    gap_fmt = fmt_amount(gap_uzs)
+    jamgarma_abs = abs(jamgarma_percent)
+
+    if not has_items:
         motiv = (
-            "👏 Zo‘r! Daromad chiqimdan yuqori — jamg‘arma o‘smoqda. Shu zaylda davom eting! 💹"
+            "ℹ️ Hali bu oy moliyaviy yozuvlar yo‘q. Birinchi kirim yoki chiqimni kiriting."
             if lang == "uz"
-            else "👏 Отлично! Доход выше расходов — сбережения растут, держите темп! 💹"
+            else "ℹ️ За месяц пока нет записей. Добавьте доход или расход, чтобы получать аналитику."
         )
+    elif balance_uzs > 0:
+        if jamgarma_percent >= 30:
+            motiv = (
+                f"🔥 Barakalla! Bu oy {gap_fmt} so'm jamg'ardingiz. Jamg‘arma ulushi {jamgarma_percent:.1f}% — shu tarzda davom eting."
+                if lang == "uz"
+                else f"🔥 Отлично! Вы отложили {gap_fmt} сум. Доля сбережений {jamgarma_percent:.1f}% — держите темп."
+            )
+        elif jamgarma_percent >= 10:
+            motiv = (
+                f"👏 Daromad chiqimdan {gap_fmt} so'mga yuqori. Jamg‘arma {jamgarma_percent:.1f}% — natija yaxshi, endi uni yanada oshiring."
+                if lang == "uz"
+                else f"👏 Доход выше расхода на {gap_fmt} сум. Сбережения {jamgarma_percent:.1f}% — отличный результат, усиливайте накопления."
+            )
+        else:
+            motiv = (
+                f"🙂 Balans musbat: {gap_fmt} so'm. Kichik xarajatlarni nazorat qilib jamg‘arma ulushini {jamgarma_percent:.1f}% dan yuqoriga ko‘taring."
+                if lang == "uz"
+                else f"🙂 Баланс в плюсе: {gap_fmt} сум. Контролируйте траты, чтобы поднять долю сбережений выше {jamgarma_percent:.1f}%."
+            )
     elif balance_uzs < 0:
-        motiv = (
-            "⚠️ Diqqat: bu oy chiqim daromaddan ko‘p. Keyingi oy kichik tejamkorlik rejasi tuzing. ✅"
-            if lang == "uz"
-            else "⚠️ Внимательнее: в этом месяце расходы превысили доход. Сократите траты и выровняйте баланс. ✅"
-        )
+        if income_uzs <= 0:
+            motiv = (
+                "⚠️ Chiqimlar bor, lekin daromad yozilmagan. Kirimlarni qayd etib to‘liq manzarani ko‘ring."
+                if lang == "uz"
+                else "⚠️ Расходы есть, но доходы не отмечены. Добавьте поступления, чтобы видеть полную картину."
+            )
+        elif jamgarma_abs >= 30:
+            motiv = (
+                f"🚨 Chiqimlar daromaddan {gap_fmt} so'm ({jamgarma_abs:.1f}%) ko‘p. Zarur bo‘lmagan xarajatlarni qisqartirib balansni tiklang."
+                if lang == "uz"
+                else f"🚨 Расходы превысили доход на {gap_fmt} сум ({jamgarma_abs:.1f}%). Срочно урежьте необязательные траты и верните баланс."
+            )
+        else:
+            motiv = (
+                f"⚠️ Balans manfiy: {gap_fmt} so'm. Tejamkorlik rejasi tuzib xarajatlarni qisqartiring."
+                if lang == "uz"
+                else f"⚠️ Баланс в минусе на {gap_fmt} сум. Запланируйте экономию и сократите расходы."
+            )
     else:
         motiv = (
-            "🙂 Balans nolga teng — yaxshi start. Endi har kungi mayda tejash bilan jamg‘arma boshlang."
+            f"🙂 Daromad va chiqim teng: {fmt_amount(income_uzs)} so'm aylantirdingiz. Endi har oy ozgina jamg‘arishni boshlang."
             if lang == "uz"
-            else "🙂 Баланс около нуля — хороший старт. Пора понемногу откладывать на подушку."
+            else f"🙂 Доход и расход совпали: оборот {fmt_amount(income_uzs)} сум. Попробуйте отложить хотя бы небольшую сумму."
         )
 
     text = (
