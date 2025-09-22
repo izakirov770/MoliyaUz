@@ -1206,6 +1206,11 @@ def guess_kind(text:str)->str:
     t=(text or "").lower()
     if "qarz berdim" in t or "qarzga berdim" in t or "qarz ber" in t: return "debt_given"
     if "qarz oldim" in t or "qarzga oldim" in t or "qarz ol" in t: return "debt_mine"
+    if "avans" in t:
+        if any(w in t for w in ["oldim","olindi","keldi","tushdi","berishdi","berildi"]):
+            return "income"
+        if any(w in t for w in ["to'ladim","tuladim","toladim","berdim","qaytardim","qaytardik"]):
+            return "expense"
     if "sotib oldim" in t or "сотиб олдим" in t or "kiyim oldim" in t: return "expense"
     expense_hints = [
         "chiqim","xarajat","taksi","benzin","ovqat","kafe","restoran","market","kommunal","internet","telefon","ijara","arenda",
