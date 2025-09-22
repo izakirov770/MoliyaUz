@@ -382,6 +382,18 @@ def update_analysis_counters(uid: int, kind: str, amount: int, currency: str) ->
     counters["tx_count"] += 1
 
 
+def revert_analysis_counters(uid: int, kind: str, amount: int, currency: str) -> None:
+    counters = ANALYSIS_COUNTERS.get(uid)
+    if not counters:
+        return
+    amt_uzs = to_uzs(amount, currency)
+    if kind == "income":
+        counters["income"] = max(0, counters["income"] - amt_uzs)
+    else:
+        counters["expense"] = max(0, counters["expense"] - amt_uzs)
+    counters["tx_count"] = max(0, counters["tx_count"] - 1)
+
+
 async def ensure_month_rollover() -> None:
     global LAST_RESET_YYYYMM
     if LAST_RESET_YYYYMM is None:
@@ -419,6 +431,7 @@ SUB_EXPIRED_NOTICE: set[int] = set()
 
 # tranzaksiya: {id, ts, kind(income|expense), amount, currency(UZS|USD|EUR), account(cash|card), category, desc}
 MEM_TX: Dict[int, List[dict]] = {}
+MEM_TX_SEQ: Dict[int, int] = {}
 # qarz: {id, ts, direction(mine|given), amount, currency, counterparty, due, status(wait|paid|received)}
 MEM_DEBTS: Dict[int, List[dict]] = {}
 MEM_DEBTS_SEQ: Dict[int,int] = {}
@@ -1086,6 +1099,15 @@ def kb_payment_with_miniapp(pid: str, pay_url: str, lang: str, mini_url: str) ->
     ])
 
 
+def kb_tx_cancel(tx_id: int, lang: str) -> InlineKeyboardMarkup:
+    text = "❌ Bekor qilish" if lang == "uz" else "❌ Отменить"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=text, callback_data=f"txcancel:{tx_id}")]
+        ]
+    )
+
+
 async def show_navigation_state(uid: int, lang: str, state: str, message: Message) -> None:
     T = L(lang)
     if state == "main":
@@ -1278,12 +1300,22 @@ def next_debt_id(uid:int)->int:
 
 async def save_tx(uid:int, kind:str, amount:int, currency:str, account:str, category:str, desc:str):
     await ensure_month_rollover()
-    MEM_TX.setdefault(uid,[]).append({
-        "id": len(MEM_TX.get(uid,[]))+1, "ts": now_tk(),
-        "kind":kind, "amount":amount, "currency":currency, "account":account,
-        "category":category, "desc":desc
-    })
+    tx_list = MEM_TX.setdefault(uid, [])
+    tx_id = MEM_TX_SEQ.get(uid, 0) + 1
+    MEM_TX_SEQ[uid] = tx_id
+    tx = {
+        "id": tx_id,
+        "ts": now_tk(),
+        "kind": kind,
+        "amount": amount,
+        "currency": currency,
+        "account": account,
+        "category": category,
+        "desc": desc,
+    }
+    tx_list.append(tx)
     update_analysis_counters(uid, kind, amount, currency)
+    return tx
 
 async def save_debt(uid:int, direction:str, amount:int, currency:str, counterparty:str, due:str)->int:
     await ensure_month_rollover()
@@ -1730,7 +1762,7 @@ async def on_text(m:Message):
 
             if entry_kind == "income":
                 title = "💪 Mehnat daromadlari" if lang == "uz" else "💪 Доход от труда"
-                await save_tx(uid, "income", amount_val, curr_val, acc_val, title, entry)
+                tx_saved = await save_tx(uid, "income", amount_val, curr_val, acc_val, title, entry)
                 await m.answer(
                     T(
                         "tx_inc",
@@ -1738,11 +1770,12 @@ async def on_text(m:Message):
                         cur=curr_val,
                         amount=fmt_amount(amount_val),
                         desc=entry,
-                    )
+                    ),
+                    reply_markup=kb_tx_cancel(tx_saved["id"], lang),
                 )
             else:
                 cat_val = guess_category(entry)
-                await save_tx(uid, "expense", amount_val, curr_val, acc_val, cat_val, entry)
+                tx_saved = await save_tx(uid, "expense", amount_val, curr_val, acc_val, cat_val, entry)
                 await m.answer(
                     T(
                         "tx_exp",
@@ -1751,7 +1784,8 @@ async def on_text(m:Message):
                         amount=fmt_amount(amount_val),
                         cat=cat_val,
                         desc=entry,
-                    )
+                    ),
+                    reply_markup=kb_tx_cancel(tx_saved["id"], lang),
                 )
 
             return True
@@ -1828,13 +1862,19 @@ async def on_text(m:Message):
         if amount is None: await m.answer(T("need_sum")); return
         curr=detect_currency(t); acc=detect_account(t)
         if kind=="income":
-            await save_tx(uid,"income",amount,curr,acc,"💪 Mehnat daromadlari" if lang=="uz" else "💪 Доход от труда",t)
-            await m.answer(T("tx_inc",date=fmt_date(now_tk()),cur=curr,amount=fmt_amount(amount),desc=t))
+            tx_saved = await save_tx(uid,"income",amount,curr,acc,"💪 Mehnat daromadlari" if lang=="uz" else "💪 Доход от труда",t)
+            await m.answer(
+                T("tx_inc",date=fmt_date(now_tk()),cur=curr,amount=fmt_amount(amount),desc=t),
+                reply_markup=kb_tx_cancel(tx_saved["id"], lang),
+            )
             return
         else:
             cat=guess_category(t)
-            await save_tx(uid,"expense",amount,curr,acc,cat,t)
-            await m.answer(T("tx_exp",date=fmt_date(now_tk()),cur=curr,amount=fmt_amount(amount),cat=cat,desc=t))
+            tx_saved = await save_tx(uid,"expense",amount,curr,acc,cat,t)
+            await m.answer(
+                T("tx_exp",date=fmt_date(now_tk()),cur=curr,amount=fmt_amount(amount),cat=cat,desc=t),
+                reply_markup=kb_tx_cancel(tx_saved["id"], lang),
+            )
             return
 
     except Exception as exc:
@@ -1959,6 +1999,49 @@ async def debt_archive_cb(c:CallbackQuery):
     lang=get_lang(uid); T=L(lang)
     await send_debt_archive_list(uid, lang, c.message.answer)
     await c.answer()
+
+
+@rt.callback_query(F.data.startswith("txcancel:"))
+async def tx_cancel_cb(c: CallbackQuery):
+    user = c.from_user
+    if not user:
+        await c.answer()
+        return
+    uid = user.id
+    lang = get_lang(uid)
+    try:
+        _, tx_id_raw = c.data.split(":", 1)
+        tx_id = int(tx_id_raw)
+    except Exception:
+        await c.answer("Xatolik." if lang == "uz" else "Ошибка.", show_alert=True)
+        return
+
+    tx_list = MEM_TX.get(uid, [])
+    index = next((i for i, item in enumerate(tx_list) if item.get("id") == tx_id), -1)
+    if index == -1:
+        msg = "Yozuv topilmadi yoki allaqachon bekor qilingan." if lang == "uz" else "Запись не найдена либо уже отменена."
+        await c.answer(msg, show_alert=True)
+        try:
+            await c.message.edit_reply_markup()
+        except Exception:
+            pass
+        return
+
+    tx = tx_list.pop(index)
+    if not tx_list:
+        MEM_TX.pop(uid, None)
+    revert_analysis_counters(uid, tx.get("kind", "expense"), tx.get("amount", 0), tx.get("currency", "UZS"))
+
+    notification = "Bekor qilindi." if lang == "uz" else "Отменено."
+    await c.answer(notification)
+    final_text = "❌ Yozuv bekor qilindi." if lang == "uz" else "❌ Запись отменена."
+    try:
+        await c.message.edit_text(final_text)
+    except Exception:
+        try:
+            await c.message.delete()
+        except Exception:
+            pass
 
 
 @rt.callback_query(F.data.startswith("rep:"))
