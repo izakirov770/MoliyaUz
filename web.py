@@ -96,16 +96,17 @@ def clickpay_pay(
     card_type: Optional[str] = Query(None),
     return_url: Optional[str] = Query(None)
 ):
-    base = os.getenv("WEB_BASE", "") or ""
-    base_clean = base.rstrip("/")
-    return_target = return_url or f"{base_clean}/payments/return?invoice_id={quote(invoice_id, safe='')}"
     params = {
         "service_id": os.getenv("CLICK_SERVICE_ID", ""),
         "merchant_id": os.getenv("CLICK_MERCHANT_ID", ""),
         "amount": str(int(amount)),
         "transaction_param": invoice_id,
-        "return_url": return_target,
     }
+    if return_url:
+        base = os.getenv("WEB_BASE", "") or ""
+        base_clean = base.rstrip("/")
+        return_target = return_url or f"{base_clean}/payments/return?invoice_id={quote(invoice_id, safe='')}"
+        params["return_url"] = return_target
     merchant_user = os.getenv("CLICK_MERCHANT_USER_ID")
     if merchant_user:
         params["merchant_user_id"] = merchant_user
