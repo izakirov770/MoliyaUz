@@ -112,6 +112,13 @@ async def check_click_status(merchant_trans_id: str) -> Dict[str, Any]:
                     "status": status_value,
                 },
             )
+            logger.info(
+                "click-status-payload",
+                extra={
+                    "merchant_trans_id": merchant_trans_id,
+                    "payload": data,
+                },
+            )
             return {
                 "paid": is_paid,
                 "payload": data,

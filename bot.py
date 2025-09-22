@@ -889,6 +889,11 @@ def kb_share(lang="uz"):
         resize_keyboard=True,one_time_keyboard=True
     )
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+
 logger = logging.getLogger(__name__)
 
 
