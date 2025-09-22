@@ -1,6 +1,30 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from texts import UZ
 
+# [SUBSCRIPTION-POLLING-BEGIN]
+import importlib.util
+import sys
+from pathlib import Path
+
+
+def _ensure_inline_module() -> None:
+    pkg_name = __name__ + ".inline"
+    if pkg_name in sys.modules:
+        return
+    inline_path = Path(__file__).with_name("inline.py")
+    if not inline_path.exists():
+        return
+    spec = importlib.util.spec_from_file_location(pkg_name, inline_path)
+    if not spec or not spec.loader:  # pragma: no cover
+        return
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    sys.modules[pkg_name] = module
+
+
+_ensure_inline_module()
+# [SUBSCRIPTION-POLLING-END]
+
 def lang_kb():
     # hozircha UZga yo'naltiramiz, lekin tugmalar ko'rinishda turadi
     return InlineKeyboardMarkup(inline_keyboard=[
