@@ -185,6 +185,7 @@ async def on_check_subscription(callback: types.CallbackQuery):
     check_result = {}
     for attempt in range(attempts):
         check_result = await check_click_status(merchant_trans_id)
+        print("CLICK STATUS DEBUG", merchant_trans_id, attempt, check_result)
         if check_result.get("status") == "error" and check_result.get("error"):
             break
         if check_result.get("paid"):
