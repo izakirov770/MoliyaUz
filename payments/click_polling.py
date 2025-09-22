@@ -98,11 +98,37 @@ async def check_click_status(merchant_trans_id: str) -> Dict[str, Any]:
             status_raw = data.get("status") or data.get("payment_status")
             note_raw = data.get("status_note") or data.get("error_note")
             status_value = str(status_raw or note_raw or "").strip().lower()
+            note_value = str(note_raw or "").strip().lower()
+
             is_paid = False
-            if status_value in {"paid", "success", "successfully_pay", "completed", "200"}:
+            numeric_tokens = set()
+            for raw in (status_raw, note_raw, data.get("status_code"), data.get("error")):
+                if raw is None:
+                    continue
+                try:
+                    numeric_tokens.add(int(str(raw).strip()))
+                except Exception:
+                    continue
+
+            if any(token in {1, 2, 3, 200} for token in numeric_tokens):
                 is_paid = True
-            elif any(token in status_value for token in ["оплачен", "успешн", "оплата прошла"]):
-                is_paid = True
+
+            success_markers = {
+                "paid",
+                "success",
+                "successfully_pay",
+                "completed",
+                "оплачен",
+                "успешн",
+                "оплата прошла",
+                "transaction completed",
+            }
+            if not is_paid:
+                combined = f"{status_value} {note_value}".strip()
+                for marker in success_markers:
+                    if marker in combined:
+                        is_paid = True
+                        break
 
             logger.info(
                 "click-status merchant_trans_id=%s status=%s code=%s",

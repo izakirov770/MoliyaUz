@@ -38,6 +38,23 @@ from db import DB_PATH
 subscription_router = Router()
 logger = logging.getLogger(__name__)
 
+ADMIN_IDS: set[int] = set()
+admin_ids_raw = os.getenv("ADMIN_IDS", "")
+for part in admin_ids_raw.split(","):
+    part = part.strip()
+    if not part:
+        continue
+    try:
+        ADMIN_IDS.add(int(part))
+    except Exception:
+        continue
+admin_id_main = os.getenv("ADMIN_ID")
+if admin_id_main:
+    try:
+        ADMIN_IDS.add(int(admin_id_main))
+    except Exception:
+        pass
+
 
 # [SUBSCRIPTION-POLLING-BEGIN]
 def _plan_label(plan_key: str) -> str:
@@ -265,3 +282,65 @@ async def on_check_subscription(callback: types.CallbackQuery):
     await callback.answer("Tasdiqlandi")
 
 # [SUBSCRIPTION-POLLING-END]
+@subscription_router.message(Command("bratula"))
+async def manual_activate(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("Faqat admin foydalana oladi.")
+        return
+
+    args = (message.text or "").split(maxsplit=2)
+    if len(args) < 2:
+        await message.answer("Foydalanish: /bratula <invoice_id> [weekly|monthly]")
+        return
+
+    invoice_id = args[1].strip()
+    plan_arg = args[2].strip().lower() if len(args) > 2 else ""
+
+    record = await get_payment_by_invoice(invoice_id)
+    if not record:
+        await message.answer("Invoice topilmadi.")
+        return
+
+    user_id = record.get("user_id")
+    if not user_id:
+        await message.answer("Invoice foydalanuvchisi aniqlanmadi.")
+        return
+
+    plan_key = record.get("plan") or plan_arg
+    if plan_key in {"weekly", "week", "hafta"}:
+        plan_key = PLAN_WEEK_KEY
+    elif plan_key in {"monthly", "month", "oy"}:
+        plan_key = PLAN_MONTH_KEY
+    if plan_key not in {PLAN_WEEK_KEY, PLAN_MONTH_KEY}:
+        plan_key = PLAN_MONTH_KEY
+
+    paid_at_utc = datetime.now(timezone.utc)
+    expires_at_utc = paid_at_utc + _plan_delta(plan_key)
+
+    await update_user_subscription_fields(
+        user_id,
+        paid_at_utc.isoformat(),
+        expires_at_utc.isoformat(),
+    )
+    await mark_polling_payment_paid(
+        invoice_id,
+        {"manual": True, "by": message.from_user.id},
+        expires_at_utc.isoformat(),
+    )
+
+    tz = ZoneInfo(os.getenv("TZ", "Asia/Tashkent"))
+    paid_local = paid_at_utc.astimezone(tz)
+    expires_local = expires_at_utc.astimezone(tz)
+    await message.answer(
+        f"Obuna qo‘lda faollashtirildi. Foydalanuvchi: {user_id}\n"
+        f"Tarif: {_plan_label(plan_key)}\n"
+        f"Amal qiladi: {expires_local.strftime('%d.%m.%Y %H:%M')}"
+    )
+
+    try:
+        await message.bot.send_message(
+            user_id,
+            "Obunangiz qo‘lda faollashtirildi. Rahmat!",
+        )
+    except Exception:
+        pass

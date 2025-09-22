@@ -394,6 +394,25 @@ def revert_analysis_counters(uid: int, kind: str, amount: int, currency: str) ->
     counters["tx_count"] = max(0, counters["tx_count"] - 1)
 
 
+async def _ensure_subscription_columns(db: aiosqlite.Connection) -> None:
+    cur = await db.execute("PRAGMA table_info(users)")
+    cols = {row[1] for row in await cur.fetchall()}
+    statements = []
+    if "sub_started_at" not in cols:
+        statements.append("ALTER TABLE users ADD COLUMN sub_started_at TIMESTAMP")
+    if "sub_until" not in cols:
+        statements.append("ALTER TABLE users ADD COLUMN sub_until TIMESTAMP")
+    if "sub_reminder_sent" not in cols:
+        statements.append("ALTER TABLE users ADD COLUMN sub_reminder_sent INTEGER DEFAULT 0")
+    for stmt in statements:
+        try:
+            await db.execute(stmt)
+        except Exception:
+            pass
+    if statements:
+        await db.commit()
+
+
 async def ensure_month_rollover() -> None:
     global LAST_RESET_YYYYMM
     if LAST_RESET_YYYYMM is None:
@@ -512,6 +531,7 @@ def _parse_dt(val: Any) -> Optional[datetime]:
 async def ensure_subscription_state(uid: int) -> None:
     try:
         async with aiosqlite.connect(DB_PATH) as db:
+            await _ensure_subscription_columns(db)
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 "SELECT sub_started_at, sub_until, sub_reminder_sent FROM users WHERE user_id=?",
@@ -541,6 +561,7 @@ async def set_user_subscription(uid: int, start_dt: datetime, end_dt: datetime) 
     end_local = _parse_dt(end_dt) or end_dt.astimezone(TASHKENT)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("INSERT INTO users(user_id) VALUES(?) ON CONFLICT(user_id) DO NOTHING", (uid,))
+        await _ensure_subscription_columns(db)
         cur = await db.execute("PRAGMA table_info(users)")
         cols = {row[1] for row in await cur.fetchall()}
         set_parts = ["sub_started_at=?", "sub_until=?", "sub_reminder_sent=0"]
@@ -561,6 +582,7 @@ async def set_user_subscription(uid: int, start_dt: datetime, end_dt: datetime) 
 
 async def mark_reminder_sent(uid: int) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
+        await _ensure_subscription_columns(db)
         await db.execute(
             "UPDATE users SET sub_reminder_sent=1 WHERE user_id=?", (uid,)
         )
