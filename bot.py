@@ -1126,6 +1126,13 @@ MULTI_AMOUNT_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 MULTI_LETTER_RE = re.compile(r"[A-Za-z\u0400-\u04FF]")
+DUE_WORD_PREFIX_RE = re.compile(
+    r"^(?P<due>(?:bugunlik|bugun|ertalikka|ertaga|indin|today|tomorrow|сегодня|завтра|послезавтра))\b[\s,.:;-]*",
+    re.IGNORECASE,
+)
+DUE_DATE_PREFIX_RE = re.compile(
+    r"^(?P<due>(?:\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?|\d{4}-\d{2}-\d{2}))\b[\s,.:;-]*",
+)
 
 
 def split_tx_entries(text: str) -> list[str]:
@@ -1636,16 +1643,22 @@ async def on_text(m:Message):
                 await m.answer(T("menu"), reply_markup=get_main_menu(lang))
             return
 
+        if step=="input_tx" and not has_access(uid):
+            await send_expired_notice(uid, lang, m.answer)
+            await m.answer(block_text(uid), reply_markup=kb_sub(lang))
+            return
+
         kind=guess_kind(t)
 
-        async def handle_debt(kind_label: str) -> None:
-            amount_val = parse_amount(t) or 0
+        async def handle_debt(entry_text: str, kind_label: str) -> bool:
+            entry = entry_text.strip()
+            amount_val = parse_amount(entry) or 0
             if amount_val <= 0:
                 await m.answer(T("debt_need"))
-                return
-            curr_val = detect_currency(t)
-            who_val = parse_counterparty(t)
-            due_val = parse_due_date(t)
+                return False
+            curr_val = detect_currency(entry)
+            who_val = parse_counterparty(entry)
+            due_val = parse_due_date(entry)
 
             if due_val:
                 await save_debt(uid, "mine" if kind_label == "debt_mine" else "given", amount_val, curr_val, who_val, due_val)
@@ -1657,7 +1670,7 @@ async def on_text(m:Message):
                 else:
                     await save_tx(uid, "expense", amount_val, curr_val, "cash", "💳 Qarz berildi", "")
                     await m.answer(T("debt_saved_given", who=who_val, cur=curr_val, amount=fmt_amount(amount_val), due=due_val))
-                return
+                return True
 
             PENDING_DEBT[uid] = {
                 "direction": "mine" if kind_label == "debt_mine" else "given",
@@ -1667,13 +1680,14 @@ async def on_text(m:Message):
             }
             STEP[uid] = "debt_mine_due" if kind_label == "debt_mine" else "debt_given_due"
             await m.answer(T("ask_due_mine") if kind_label == "debt_mine" else T("ask_due_given"))
+            return False
 
-        async def handle_basic_entry(entry_text: str) -> bool:
+        async def handle_basic_entry(entry_text: str, pre_kind: Optional[str] = None) -> bool:
             entry = entry_text.strip()
             if not entry:
                 return False
 
-            entry_kind = guess_kind(entry)
+            entry_kind = pre_kind or guess_kind(entry)
             if entry_kind in ("debt_mine", "debt_given"):
                 await m.answer(T("need_sum"))
                 return False
@@ -1714,35 +1728,73 @@ async def on_text(m:Message):
 
             return True
 
-        # hisobla input
-        if step=="input_tx":
-            if not has_access(uid):
-                await send_expired_notice(uid, lang, m.answer)
-                await m.answer(block_text(uid), reply_markup=kb_sub(lang)); return
-            if kind in ("debt_mine","debt_given"):
-                await handle_debt(kind)
+        def extract_due_prefix(text: str) -> tuple[str, str]:
+            raw = (text or "").lstrip()
+            if not raw:
+                return "", text
+            for pattern in (DUE_WORD_PREFIX_RE, DUE_DATE_PREFIX_RE):
+                m_pref = pattern.match(raw)
+                if not m_pref:
+                    continue
+                candidate = (m_pref.group("due") or "").strip(" ,.;:-")
+                if not candidate:
+                    continue
+                if parse_due_date(candidate) is None:
+                    continue
+                rest = raw[m_pref.end():].lstrip()
+                return candidate, rest
+            return "", text
+
+        raw_entries = split_tx_entries(t)
+        entries = [entry.strip() for entry in raw_entries if entry.strip()]
+        if len(entries) > 1:
+            processed_any = False
+            idx = 0
+            while idx < len(entries):
+                entry = entries[idx]
+                entry_kind = guess_kind(entry)
+                if entry_kind in ("debt_mine", "debt_given"):
+                    if parse_due_date(entry) is None:
+                        attach_idx = idx + 1
+                        while attach_idx < len(entries):
+                            candidate, remainder = extract_due_prefix(entries[attach_idx])
+                            if not candidate:
+                                break
+                            entry = f"{entry} {candidate}".strip()
+                            entries[idx] = entry
+                            if remainder:
+                                entries[attach_idx] = remainder
+                                break
+                            entries.pop(attach_idx)
+                        # After potential due merge, entry is updated
+                    should_continue = await handle_debt(entry, entry_kind)
+                    if not should_continue:
+                        return
+                    processed_any = True
+                    idx += 1
+                    continue
+
+                ok = await handle_basic_entry(entry, entry_kind)
+                if not ok:
+                    return
+                processed_any = True
+                idx += 1
+
+            if processed_any:
                 return
+
+        # hisobla input
+        if step=="input_tx" and kind in ("debt_mine","debt_given"):
+            await handle_debt(t, kind)
+            return
 
         if step!="input_tx" and kind in ("debt_mine","debt_given"):
             if not has_access(uid):
                 await send_expired_notice(uid, lang, m.answer)
                 await m.answer(block_text(uid), reply_markup=kb_sub(lang))
                 return
-            await handle_debt(kind)
+            await handle_debt(t, kind)
             return
-
-        multi_entries = split_tx_entries(t)
-        if len(multi_entries) > 1:
-            filtered_entries = [entry for entry in multi_entries if entry.strip()]
-            if filtered_entries and all(guess_kind(entry) not in ("debt_mine", "debt_given") for entry in filtered_entries):
-                processed_any = False
-                for chunk in filtered_entries:
-                    ok = await handle_basic_entry(chunk)
-                    if not ok:
-                        return
-                    processed_any = True
-                if processed_any:
-                    return
 
         amount=parse_amount(t)
         if amount is None: await m.answer(T("need_sum")); return
