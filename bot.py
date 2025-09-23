@@ -426,18 +426,18 @@ async def ensure_month_rollover() -> None:
 
 
 async def update_bot_bio(total_users: int) -> None:
+    """Keep legacy command but stop overriding the BotFather description."""
     try:
         current = await bot.get_my_description()
-        desc = (current.description or "") if current else ""
     except Exception:
-        desc = ""
-    suffix = f" | Foydalanuvchilar: {total_users}"
-    if " | Foydalanuvchilar:" in desc:
-        new_desc = re.sub(r" \| Foydalanuvchilar: \d+", suffix, desc)
-    else:
-        new_desc = f"{desc}{suffix}" if desc else f"Foydalanuvchilar: {total_users}"
+        return
+    desc = (current.description or "") if current else ""
+    # Strip previously injected counters so the BotFather description stays intact.
+    cleaned_desc = re.sub(r"(?:\s*\|)?\s*Foydalanuvchilar: \d+", "", desc).strip()
+    if cleaned_desc == desc:
+        return
     try:
-        await bot.set_my_description(new_desc)
+        await bot.set_my_description(cleaned_desc)
     except Exception:
         pass
 
