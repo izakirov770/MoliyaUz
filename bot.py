@@ -1145,7 +1145,6 @@ def kb_payment(pid, pay_url, lang="uz"):
     T=L(lang)
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=T("pay_click"), url=pay_url)],
-        [InlineKeyboardButton(text=T("sub_manual_btn"), callback_data=f"subpoll:manual:{pid}")],
     ])
 
 
@@ -1154,7 +1153,6 @@ def kb_payment_with_miniapp(pid: str, pay_url: str, lang: str, mini_url: str) ->
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💳 CLICK (Mini App)", web_app=WebAppInfo(url=mini_url))],
         [InlineKeyboardButton(text=T("pay_click"), url=pay_url)],
-        [InlineKeyboardButton(text=T("sub_manual_btn"), callback_data=f"subpoll:manual:{pid}")],
     ])
 
 
@@ -1746,6 +1744,29 @@ async def on_text(m:Message):
 
         if t==T("sub_month"):
             await send_subscription_invoice_message(uid, lang, "month", m)
+            return
+
+        if t==T("sub_manual_btn"):
+            record = await payments_get_latest_payment(uid)
+            status = (record.get("status") or "").lower() if record else ""
+            if not record or status == "paid":
+                await send_subscription_invoice_message(uid, lang, "month", m)
+                return
+
+            invoice_id = record.get("invoice_id")
+            amount_raw = record.get("amount")
+            try:
+                amount_val = Decimal(str(amount_raw or "0")).quantize(Decimal("1"))
+            except Exception:
+                amount_val = Decimal("0")
+
+            plan_label = T("sub_month")
+            amount_display = f"{int(amount_val):,}".replace(",", " ") if amount_val else str(amount_raw)
+            pay_link = create_click_link(invoice_id, int(amount_val) if amount_val else MONTH_PLAN_PRICE)
+            await m.answer(
+                T("sub_created", plan=plan_label, amount=amount_display),
+                reply_markup=kb_payment(invoice_id, pay_link, lang),
+            )
             return
 
         if t==T("pay_check"):
