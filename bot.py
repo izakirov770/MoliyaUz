@@ -69,8 +69,18 @@ CLICK_INCLUDE_RETURN_URL = os.getenv("CLICK_INCLUDE_RETURN_URL", "false").lower(
 
 NOTION_OFER_URL = "https://www.notion.so/OFERA-26a8fa17fd1f803f8025f07f98f89c87?source=copy_link"
 
-BOT_DESCRIPTION_TEXT = os.getenv("BOT_DESCRIPTION", "").strip()
-BOT_SHORT_DESCRIPTION_TEXT = os.getenv("BOT_SHORT_DESCRIPTION", "").strip()
+DEFAULT_BOT_DESCRIPTION = (
+    "📊 MoliyaUz – shaxsiy moliyani avtomatik boshqaruvchi yordamchi.\n"
+    "Matndan kirim/chiqimni tushunadi, avtomatik kategoriyalaydi va qarz muddatini eslatadi."
+)
+DEFAULT_BOT_SHORT_DESCRIPTION = "📊 MoliyaUz — shaxsiy moliyani boshqaruvchi yordamchi"
+
+BOT_DESCRIPTION_TEXT = (
+    os.getenv("BOT_DESCRIPTION") or DEFAULT_BOT_DESCRIPTION
+).strip()
+BOT_SHORT_DESCRIPTION_TEXT = (
+    os.getenv("BOT_SHORT_DESCRIPTION") or DEFAULT_BOT_SHORT_DESCRIPTION
+).strip()
 
 # ====== PACKAGE BRIDGE ======
 _BOT_MODULE_PATH = Path(__file__).resolve().parent / "bot"
@@ -2722,6 +2732,7 @@ async def main():
     dp.include_router(pay_debug_router)
     dp.include_router(subscription_router)
     dp.include_router(rt)
+    await ensure_bot_description()
     try:
         await set_cmds()
     except Exception as exc:
