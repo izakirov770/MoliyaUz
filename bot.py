@@ -1481,6 +1481,14 @@ async def start(m:Message):
     STEP[uid]="lang"
     await m.answer(t_uz("start_choose"), reply_markup=kb_lang())
 
+    # Debugging helper: log chat type and ID for group setup
+    logger.info(
+        "start-command chat-info type=%s id=%s title=%s",
+        m.chat.type,
+        m.chat.id,
+        getattr(m.chat, "title", ""),
+    )
+
 @rt.message(Command("menu"))
 async def menu_cmd(m: Message):
     uid = m.from_user.id
