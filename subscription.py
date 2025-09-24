@@ -61,6 +61,26 @@ except Exception:
 PENDING_MANUAL_DIGITS: dict[int, dict[str, str]] = {}
 
 
+async def _is_authorized_admin(callback: types.CallbackQuery) -> bool:
+    user_id = callback.from_user.id if callback.from_user else 0
+    if user_id in ADMIN_IDS:
+        return True
+    chat = callback.message.chat if callback.message else None
+    if chat and chat.id == REVIEW_CHAT_ID:
+        try:
+            member = await callback.bot.get_chat_member(chat.id, user_id)
+        except Exception as exc:  # pragma: no cover
+            logger.warning(
+                "manual-approve-admin-check-failed",
+                extra={"error": str(exc), "user_id": user_id},
+            )
+            return False
+        status = getattr(member, "status", "")
+        if status in {"administrator", "creator"}:
+            return True
+    return False
+
+
 def _has_pending_manual_request(message: types.Message) -> bool:
     if not isinstance(message, types.Message) or not message.from_user:
         return False
@@ -282,7 +302,7 @@ async def on_manual_last_four(message: types.Message):
 
 @subscription_router.callback_query(F.data.startswith("subpoll:approve"))
 async def on_manual_approve(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
+    if not await _is_authorized_admin(callback):
         await callback.answer("Ruxsat yo‘q", show_alert=True)
         return
 
