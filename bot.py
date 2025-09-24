@@ -722,7 +722,7 @@ def t_uz(k,**kw):
 
         "sub_choose":(
             "⭐️ 1 oylik obunani tanlang va CLICK orqali to‘lovni amalga oshiring.\n\n"
-            "To‘lov tugagach, “Obunani faollashtirish” tugmasini bosib, kartaning oxirgi 4 raqamini yuboring.\n"
+            "To‘lov tugagach, “Obunani faollashtirish” tugmasini bosib, to‘lov qilingan kartaning oxirgi 4 raqamini yuboring.\n"
             "Obuna 10 daqiqagacha faollashadi va tasdiq xabari keladi."
         ),
         "sub_week":"1 haftalik obuna — 7 900 so‘m",
@@ -730,10 +730,11 @@ def t_uz(k,**kw):
         "sub_created":(
             "To‘lov yaratildi.\n\n"
             "Reja: <b>{plan}</b>\nSumma: <b>{amount} so‘m</b>\n\n"
-            "To‘lovni yakunlagach, “Obunani faollashtirish” tugmasi orqali kartangizning oxirgi 4 raqamini yuboring."
+            "To‘lovni yakunlagach, “Obunani faollashtirish” tugmasi orqali to‘lov qilingan kartangizning oxirgi 4 raqamini yuboring."
         ),
         "sub_activated":"✅ Obuna faollashtirildi: {plan} (gacha {until})",
         "pay_click":"CLICK orqali to‘lash","pay_check":"To‘lovni tekshirish",
+        "sub_manual_btn":"Obunani faollashtirish",
         "pay_checking":"🔄 To‘lov holati tekshirilmoqda…","pay_notfound":"To‘lov topilmadi yoki tasdiqlanmagan.",
         "pay_status_paid":"✅ To‘lov tasdiqlandi: {plan}\nObuna {until} gacha faollashtirildi.",
         "pay_status_pending":"⏳ To‘lov hali tasdiqlanmadi. Birozdan so‘ng qayta tekshiring.",
@@ -877,7 +878,7 @@ def t_ru(k, **kw):
 
         "sub_choose":(
             "⭐️ Выберите месячную подписку и оплатите её через CLICK.\n\n"
-            "После оплаты нажмите кнопку «Активировать подписку» и отправьте последние 4 цифры карты.\n"
+            "После оплаты нажмите кнопку «Активировать подписку» и отправьте последние 4 цифры оплаченной карты.\n"
             "Подписка активируется в течение 10 минут, мы пришлём уведомление."
         ),
         "sub_week": "Подписка на 1 неделю — 7 900 сум",
@@ -885,10 +886,11 @@ def t_ru(k, **kw):
         "sub_created":(
             "Платеж создан.\n\n"
             "Тариф: <b>{plan}</b>\nСумма: <b>{amount} сум</b>\n\n"
-            "После оплаты воспользуйтесь кнопкой «Активировать подписку» и отправьте последние 4 цифры карты."
+            "После оплаты воспользуйтесь кнопкой «Активировать подписку» и отправьте последние 4 цифры оплаченной карты."
         ),
         "sub_activated": "✅ Подписка активирована: {plan} (до {until})",
         "pay_click": "Оплатить в CLICK", "pay_check": "Проверить платеж",
+        "sub_manual_btn": "Активировать подписку",
         "pay_checking": "🔄 Проверяем статус платежа…", "pay_notfound": "Платеж не найден или не подтвержден.",
         "pay_status_paid": "✅ Платеж подтвержден: {plan}\nПодписка активна до {until}.",
         "pay_status_pending": "⏳ Платеж ещё не подтвержден. Попробуйте снова чуть позже.",
@@ -1142,7 +1144,8 @@ def kb_sub(lang="uz"):
 def kb_payment(pid, pay_url, lang="uz"):
     T=L(lang)
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=T("pay_click"), url=pay_url)]
+        [InlineKeyboardButton(text=T("pay_click"), url=pay_url)],
+        [InlineKeyboardButton(text=T("sub_manual_btn"), callback_data=f"subpoll:manual:{pid}")],
     ])
 
 
@@ -1150,7 +1153,8 @@ def kb_payment_with_miniapp(pid: str, pay_url: str, lang: str, mini_url: str) ->
     T = L(lang)
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💳 CLICK (Mini App)", web_app=WebAppInfo(url=mini_url))],
-        [InlineKeyboardButton(text=T("pay_click"), url=pay_url)]
+        [InlineKeyboardButton(text=T("pay_click"), url=pay_url)],
+        [InlineKeyboardButton(text=T("sub_manual_btn"), callback_data=f"subpoll:manual:{pid}")],
     ])
 
 
@@ -1741,7 +1745,6 @@ async def on_text(m:Message):
             return
 
         if t==T("sub_month"):
-            nav_push(uid, "sub_payment")
             await send_subscription_invoice_message(uid, lang, "month", m)
             return
 
@@ -2350,7 +2353,6 @@ async def sub_cb(c:CallbackQuery):
     uid=c.from_user.id
     lang=get_lang(uid)
     code=c.data.split(":")[1]
-    nav_push(uid, "sub_payment")
     await send_subscription_invoice_message(uid, lang, code, c.message)
     await c.answer()
 
