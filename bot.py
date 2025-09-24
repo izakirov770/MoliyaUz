@@ -75,11 +75,24 @@ DEFAULT_BOT_DESCRIPTION = (
 )
 DEFAULT_BOT_SHORT_DESCRIPTION = "📊 MoliyaUz — shaxsiy moliyani boshqaruvchi yordamchi"
 
-BOT_DESCRIPTION_TEXT = (
-    os.getenv("BOT_DESCRIPTION") or DEFAULT_BOT_DESCRIPTION
+BOT_DESCRIPTION_TEXT = (os.getenv("BOT_DESCRIPTION") or DEFAULT_BOT_DESCRIPTION).strip()
+BOT_DESCRIPTION_TEXT_RU = (
+    os.getenv("BOT_DESCRIPTION_RU")
+    or "📊 MoliyaUz — ваш ассистент по личным финансам.\nПонимает доходы/расходы из текста, автоматически категоризирует и напоминает о сроках долгов."
 ).strip()
+BOT_DESCRIPTION_TEXT_UZ = (
+    os.getenv("BOT_DESCRIPTION_UZ") or BOT_DESCRIPTION_TEXT
+).strip()
+
 BOT_SHORT_DESCRIPTION_TEXT = (
     os.getenv("BOT_SHORT_DESCRIPTION") or DEFAULT_BOT_SHORT_DESCRIPTION
+).strip()
+BOT_SHORT_DESCRIPTION_TEXT_RU = (
+    os.getenv("BOT_SHORT_DESCRIPTION_RU")
+    or "📊 MoliyaUz — ассистент по личным финансам"
+).strip()
+BOT_SHORT_DESCRIPTION_TEXT_UZ = (
+    os.getenv("BOT_SHORT_DESCRIPTION_UZ") or BOT_SHORT_DESCRIPTION_TEXT
 ).strip()
 
 # ====== PACKAGE BRIDGE ======
@@ -468,14 +481,24 @@ async def ensure_bot_description() -> None:
     global BOT_DESCRIPTION_APPLIED
     if BOT_DESCRIPTION_APPLIED:
         return
-    if not (BOT_DESCRIPTION_TEXT or BOT_SHORT_DESCRIPTION_TEXT):
-        BOT_DESCRIPTION_APPLIED = True
-        return
     try:
-        if BOT_SHORT_DESCRIPTION_TEXT:
-            await bot.set_my_short_description(BOT_SHORT_DESCRIPTION_TEXT)
-        if BOT_DESCRIPTION_TEXT:
-            await bot.set_my_description(BOT_DESCRIPTION_TEXT)
+        # Short description
+        for lang_code, text in (
+            (None, BOT_SHORT_DESCRIPTION_TEXT),
+            ("ru", BOT_SHORT_DESCRIPTION_TEXT_RU),
+            ("uz", BOT_SHORT_DESCRIPTION_TEXT_UZ),
+        ):
+            if text:
+                await bot.set_my_short_description(text, language_code=lang_code)
+
+        # Full description
+        for lang_code, text in (
+            (None, BOT_DESCRIPTION_TEXT),
+            ("ru", BOT_DESCRIPTION_TEXT_RU),
+            ("uz", BOT_DESCRIPTION_TEXT_UZ),
+        ):
+            if text:
+                await bot.set_my_description(text, language_code=lang_code)
     except Exception as exc:  # pragma: no cover
         logging.getLogger(__name__).warning("set-bot-description-failed: %s", exc)
     BOT_DESCRIPTION_APPLIED = True
@@ -1540,6 +1563,8 @@ async def start(m:Message):
         display_name = profile.get("name") if isinstance(profile, dict) else None
         if not display_name:
             display_name = (m.from_user.full_name or m.from_user.first_name or m.from_user.username or "") if m.from_user else ""
+        if display_name and display_name.lower().startswith("polzovatel"):
+            display_name = ""  # reset fallback for generic 'polzovatel'
         if not display_name:
             display_name = "do‘stim" if lang == "uz" else "друг"
         await m.answer(L(lang)("welcome_back", name=display_name))
@@ -1674,7 +1699,11 @@ async def on_text(m:Message):
             clean_name = t.strip()
             if clean_name:
                 update_user_profile(uid, name=clean_name, lang=lang)
-            display_name = clean_name or (m.from_user.full_name if m.from_user else "") or ("do‘stim" if lang=="uz" else "друг")
+            display_name = clean_name or (m.from_user.full_name if m.from_user else "")
+            if display_name and display_name.lower().startswith("polzovatel"):
+                display_name = ""
+            if not display_name:
+                display_name = "do‘stim" if lang=="uz" else "друг"
             await m.answer(T("welcome", name=display_name), reply_markup=kb_share(lang))
             await m.answer("—", reply_markup=kb_oferta(lang))
             STEP[uid]="need_phone"; return
