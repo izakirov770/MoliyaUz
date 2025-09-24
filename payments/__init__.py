@@ -256,6 +256,7 @@ async def update_manual_request_status(
     status: str,
     approved_by: Optional[int] = None,
     approved_at_iso: Optional[str] = None,
+    notification_sent: Optional[bool] = None,
 ) -> Optional[Dict[str, Any]]:
     await ensure_schema()
     updates = ["status=?"]
@@ -266,6 +267,9 @@ async def update_manual_request_status(
     if approved_at_iso is not None:
         updates.append("approved_at=?")
         params.append(approved_at_iso)
+    if notification_sent is not None:
+        updates.append("notes=?")
+        params.append("notified" if notification_sent else "")
     params.append(request_id)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(

@@ -76,6 +76,5 @@ def report_kb():
 
 def subs_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=UZ["btn_week"], callback_data="sub:week")],
         [InlineKeyboardButton(text=UZ["btn_month"], callback_data="sub:month")],
     ])

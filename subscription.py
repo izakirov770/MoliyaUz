@@ -165,7 +165,10 @@ async def _finalize_paid(
 @subscription_router.message(Command("subscription"))
 async def subscription_menu(message: types.Message):
     await message.answer(
-        "Obuna tarifini tanlang:", reply_markup=subscription_plans_kb()
+        "⭐️ 1 oylik obunani tanlang va CLICK orqali to‘lovni amalga oshiring.\n\n"
+        "To‘lov tugagach, “Obunani faollashtirish” tugmasini bosib, kartaning oxirgi 4 raqamini yuboring.\n"
+        "Obuna 10 daqiqagacha faollashadi va tasdiq xabari keladi.",
+        reply_markup=subscription_plans_kb(),
     )
     await _send_status(message)
 

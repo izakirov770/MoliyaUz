@@ -720,10 +720,18 @@ def t_uz(k,**kw):
         "st_wait":"⏳ Kutilmoqda","st_paid":"✅ Tulangan","st_rcv":"✅ Qaytarilgan",
         "btn_paid":"✅ Tuladim","btn_rcv":"✅ Berildi",
 
-        "sub_choose":"Obuna turini tanlang:",
+        "sub_choose":(
+            "⭐️ 1 oylik obunani tanlang va CLICK orqali to‘lovni amalga oshiring.\n\n"
+            "To‘lov tugagach, “Obunani faollashtirish” tugmasini bosib, kartaning oxirgi 4 raqamini yuboring.\n"
+            "Obuna 10 daqiqagacha faollashadi va tasdiq xabari keladi."
+        ),
         "sub_week":"1 haftalik obuna — 7 900 so‘m",
         "sub_month":"1 oylik obuna — 19 900 so‘m",
-        "sub_created":"To‘lov yaratildi.\n\nReja: <b>{plan}</b>\nSumma: <b>{amount} so‘m</b>\n\n⬇️ CLICK orqali to‘lang, so‘ng menyudagi <b>“To‘lovni tekshirish”</b> tugmasini bosing.",
+        "sub_created":(
+            "To‘lov yaratildi.\n\n"
+            "Reja: <b>{plan}</b>\nSumma: <b>{amount} so‘m</b>\n\n"
+            "To‘lovni yakunlagach, “Obunani faollashtirish” tugmasi orqali kartangizning oxirgi 4 raqamini yuboring."
+        ),
         "sub_activated":"✅ Obuna faollashtirildi: {plan} (gacha {until})",
         "pay_click":"CLICK orqali to‘lash","pay_check":"To‘lovni tekshirish",
         "pay_checking":"🔄 To‘lov holati tekshirilmoqda…","pay_notfound":"To‘lov topilmadi yoki tasdiqlanmagan.",
@@ -867,10 +875,18 @@ def t_ru(k, **kw):
         "st_wait": "⏳ Ожидается", "st_paid": "✅ Оплачен", "st_rcv": "✅ Возвращен",
         "btn_paid": "✅ Оплатил", "btn_rcv": "✅ Вернул",
 
-        "sub_choose": "Выберите тип подписки:",
+        "sub_choose":(
+            "⭐️ Выберите месячную подписку и оплатите её через CLICK.\n\n"
+            "После оплаты нажмите кнопку «Активировать подписку» и отправьте последние 4 цифры карты.\n"
+            "Подписка активируется в течение 10 минут, мы пришлём уведомление."
+        ),
         "sub_week": "Подписка на 1 неделю — 7 900 сум",
         "sub_month": "Подписка на 1 месяц — 19 900 сум",
-        "sub_created": "Платеж создан.\n\nТариф: <b>{plan}</b>\nСумма: <b>{amount} сум</b>\n\n⬇️ Оплатите через CLICK, затем в меню нажмите <b>«Проверить платеж»</b>.",
+        "sub_created":(
+            "Платеж создан.\n\n"
+            "Тариф: <b>{plan}</b>\nСумма: <b>{amount} сум</b>\n\n"
+            "После оплаты воспользуйтесь кнопкой «Активировать подписку» и отправьте последние 4 цифры карты."
+        ),
         "sub_activated": "✅ Подписка активирована: {plan} (до {until})",
         "pay_click": "Оплатить в CLICK", "pay_check": "Проверить платеж",
         "pay_checking": "🔄 Проверяем статус платежа…", "pay_notfound": "Платеж не найден или не подтвержден.",
@@ -920,9 +936,11 @@ def kb_share(lang="uz"):
     )
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
+
+logging.getLogger("aiosqlite").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
@@ -1059,7 +1077,6 @@ def kb_sub_menu_reply(lang: str = "uz") -> ReplyKeyboardMarkup:
     T = L(lang)
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=T("sub_week"))],
             [KeyboardButton(text=T("sub_month"))],
             [KeyboardButton(text=T("pay_check"))],
             [KeyboardButton(text=T("btn_back"))],
@@ -1119,7 +1136,6 @@ def kb_debt_done(direction,debt_id, lang="uz"):
 def kb_sub(lang="uz"):
     T=L(lang)
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=T("sub_week"),callback_data="sub:week")],
         [InlineKeyboardButton(text=T("sub_month"),callback_data="sub:month")]
     ])
 
@@ -1724,11 +1740,6 @@ async def on_text(m:Message):
             await send_debt_archive_list(uid, lang, m.answer, reply_markup=kb_debt_menu_reply(lang))
             return
 
-        if t==T("sub_week"):
-            nav_push(uid, "sub_payment")
-            await send_subscription_invoice_message(uid, lang, "week", m)
-            return
-
         if t==T("sub_month"):
             nav_push(uid, "sub_payment")
             await send_subscription_invoice_message(uid, lang, "month", m)
@@ -2310,14 +2321,9 @@ def create_click_link(pid: str, amount: int) -> str:
 
 async def send_subscription_invoice_message(uid: int, lang: str, code: str, message: Message) -> None:
     T = L(lang)
-    if code == "week":
-        plan = T("sub_week")
-        days = 7
-        price = 7900
-    else:
-        plan = T("sub_month")
-        days = 30
-        price = MONTH_PLAN_PRICE
+    plan = T("sub_month")
+    days = 30
+    price = MONTH_PLAN_PRICE
     amount_dec = Decimal(price)
     plan_info = payments_detect_plan(amount_dec)
     plan_key = plan_info[0] if plan_info else None
