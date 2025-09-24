@@ -61,6 +61,12 @@ except Exception:
 PENDING_MANUAL_DIGITS: dict[int, dict[str, str]] = {}
 
 
+def _has_pending_manual_request(message: types.Message) -> bool:
+    if not isinstance(message, types.Message) or not message.from_user:
+        return False
+    return bool(PENDING_MANUAL_DIGITS.get(message.from_user.id))
+
+
 # [SUBSCRIPTION-POLLING-BEGIN]
 def _plan_label(plan_key: str) -> str:
     if plan_key == PLAN_WEEK_KEY:
@@ -188,7 +194,7 @@ async def on_manual_activation_request(callback: types.CallbackQuery):
     await callback.answer("Ko‘rsatma yuborildi")
 
 
-@subscription_router.message(F.text)
+@subscription_router.message(F.text, _has_pending_manual_request)
 async def on_manual_last_four(message: types.Message):
     pending = PENDING_MANUAL_DIGITS.get(message.from_user.id)
     if not pending:
