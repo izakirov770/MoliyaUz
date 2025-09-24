@@ -64,7 +64,14 @@ PENDING_MANUAL_DIGITS: dict[int, dict[str, str]] = {}
 def _has_pending_manual_request(message: types.Message) -> bool:
     if not isinstance(message, types.Message) or not message.from_user:
         return False
-    return bool(PENDING_MANUAL_DIGITS.get(message.from_user.id))
+    ctx = PENDING_MANUAL_DIGITS.get(message.from_user.id)
+    if not ctx:
+        return False
+    text = (message.text or "").strip()
+    if text.lower() in {"/cancel", "cancel", "bekor"}:
+        return True
+    digits = re.sub(r"\D", "", text)
+    return len(digits) == 4
 
 
 # [SUBSCRIPTION-POLLING-BEGIN]

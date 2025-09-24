@@ -1755,6 +1755,7 @@ async def on_text(m:Message):
             return
 
         if t==T("sub_month"):
+            PENDING_MANUAL_DIGITS.pop(uid, None)
             await send_subscription_invoice_message(uid, lang, "month", m)
             return
 
