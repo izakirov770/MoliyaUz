@@ -71,6 +71,7 @@ async def ensure_schema() -> None:
         await db.execute(PAYMENTS_LOGS_TABLE)
         await db.execute(MANUAL_REQUESTS_TABLE)
         await _ensure_polling_columns(db)
+        await _ensure_user_subscription_columns(db)
         await db.commit()
     _schema_ready = True
 
@@ -98,6 +99,29 @@ async def _ensure_polling_columns(db: aiosqlite.Connection) -> None:
 async def _ensure_polling_columns_autocommit() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await _ensure_polling_columns(db)
+        await db.commit()
+
+
+async def _ensure_user_subscription_columns(db: aiosqlite.Connection) -> None:
+    cur = await db.execute("PRAGMA table_info(users)")
+    cols = {row[1] for row in await cur.fetchall()}
+    statements = []
+    if "sub_started_at" not in cols:
+        statements.append("ALTER TABLE users ADD COLUMN sub_started_at TIMESTAMP")
+    if "sub_until" not in cols:
+        statements.append("ALTER TABLE users ADD COLUMN sub_until TIMESTAMP")
+    if "sub_reminder_sent" not in cols:
+        statements.append("ALTER TABLE users ADD COLUMN sub_reminder_sent INTEGER DEFAULT 0")
+    for stmt in statements:
+        try:
+            await db.execute(stmt)
+        except Exception:
+            pass
+
+
+async def _ensure_user_subscription_columns_autocommit() -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _ensure_user_subscription_columns(db)
         await db.commit()
 
 
@@ -403,6 +427,7 @@ def detect_plan(amount: Decimal) -> Optional[Tuple[str, int]]:
 
 
 async def update_user_subscription_fields(user_id: int, start_iso: str, end_iso: str) -> None:
+    await _ensure_user_subscription_columns_autocommit()
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT INTO users(user_id) VALUES(?) ON CONFLICT(user_id) DO NOTHING",
@@ -431,6 +456,7 @@ async def update_user_subscription_fields(user_id: int, start_iso: str, end_iso:
 
 
 async def mark_user_reminder_sent(user_id: int) -> None:
+    await _ensure_user_subscription_columns_autocommit()
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE users SET sub_reminder_sent=1 WHERE user_id=?",
@@ -441,10 +467,12 @@ async def mark_user_reminder_sent(user_id: int) -> None:
 
 async def users_for_expiry_reminder(cutoff_iso: str) -> list[Dict[str, Any]]:
     await ensure_schema()
+    await _ensure_user_subscription_columns_autocommit()
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            "SELECT user_id, sub_until FROM users WHERE sub_until IS NOT NULL AND sub_reminder_sent=0",
+            "SELECT user_id, sub_until FROM users "
+            "WHERE sub_until IS NOT NULL AND (sub_reminder_sent IS NULL OR sub_reminder_sent=0)",
         )
         rows = await cur.fetchall()
     items = []
