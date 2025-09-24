@@ -1080,7 +1080,7 @@ def kb_sub_menu_reply(lang: str = "uz") -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=T("sub_month"))],
-            [KeyboardButton(text=T("pay_check"))],
+            [KeyboardButton(text=T("sub_manual_btn"))],
             [KeyboardButton(text=T("btn_back"))],
         ],
         resize_keyboard=True,
