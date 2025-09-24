@@ -147,7 +147,7 @@ async def _send_status(message: types.Message) -> None:
     plan_label = _plan_label(plan_key)
     status = "Faol" if until > datetime.now(timezone.utc) else "Muddati tugagan"
     await message.answer(
-        f"Holat: {status}\nTarif: {plan_label}\nAmal qiladi: {until_local.strftime('%d.%m.%Y %H:%M')}"
+        f"Holat: {status}\nTarif: {plan_label}\nAmal qiladi: {until_local.strftime('%d.%m.%Y')}"
     )
 
 
@@ -252,8 +252,7 @@ async def on_manual_last_four(message: types.Message):
 
     if not REVIEW_CHAT_ID:
         await message.answer(
-            "Ma’lumot qabul qilindi. Administrator so‘rovni qo‘lda ko‘rib chiqadi."
-            " 10 daqiqagacha ichida obunangiz faollashgani haqida xabar beramiz."
+            "Ma’lumot qabul qilindi. 10 daqiqagacha ichida obunangiz faollashgani haqida xabar beramiz."
         )
         return
 
@@ -295,8 +294,7 @@ async def on_manual_last_four(message: types.Message):
         return
 
     await message.answer(
-        "Rahmat! Administratorlar so‘rovni ko‘rib chiqishadi."
-        " 10 daqiqagacha ichida obunangiz faollashgani haqida xabar beramiz."
+        "Rahmat! 10 daqiqagacha ichida obunangiz faollashgani haqida xabar beramiz."
     )
 
 
@@ -368,12 +366,14 @@ async def on_manual_approve(callback: types.CallbackQuery):
     expires_local = expires_at.astimezone(tz)
     plan_label = _plan_label(plan_key)
 
+    expires_str = expires_local.strftime('%d.%m.%Y')
+
     try:
         await callback.bot.send_message(
             user_id,
-            "Obunangiz qo‘lda tasdiqlandi ✅\n"
+            "Obunangiz tasdiqlandi ✅\n"
             f"Tarif: {plan_label}\n"
-            f"Amal qiladi: {expires_local.strftime('%d.%m.%Y %H:%M')} gacha",
+            f"Amal qiladi: {expires_str} gacha",
         )
     except Exception as exc:
         logger.warning(
@@ -389,7 +389,7 @@ async def on_manual_approve(callback: types.CallbackQuery):
         f"So‘rov ID: {request_id}\n"
         f"Foydalanuvchi ID: {user_id}\n"
         f"Tarif: {plan_label}\n"
-        f"Amal qilish muddati: {expires_local.strftime('%d.%m.%Y %H:%M')}\n"
+        f"Amal qiladi: {expires_str}\n"
         f"Tasdiqladi: {callback.from_user.full_name}{admin_username} (ID: {callback.from_user.id})"
     )
 
@@ -447,7 +447,7 @@ async def manual_activate(message: types.Message):
     await message.answer(
         f"Obuna qo‘lda faollashtirildi. Foydalanuvchi: {user_id}\n"
         f"Tarif: {_plan_label(plan_key)}\n"
-        f"Amal qiladi: {expires_local.strftime('%d.%m.%Y %H:%M')}"
+        f"Amal qiladi: {expires_local.strftime('%d.%m.%Y')}"
     )
 
     try:

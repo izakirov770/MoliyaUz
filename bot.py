@@ -614,7 +614,7 @@ def t_uz(k,**kw):
         "start_choose":"Assalomu alaykum, iltimos bot tilni tanlang.",
         "ask_name":"Ajoyib, tanishib olamiz, ismingiz nima?",
         "welcome":(
-            "Xush kelibsiz! 👋\n\n"
+            "Xush kelibsiz, {name}! 👋\n\n"
             "📊 MoliyaUz – shaxsiy moliyani avtomatik boshqaruvchi yordamchi.\n"
             "— Matndan kirim/chiqimni tushunadi 💬\n"
             "— Avto-kategoriyalab saqlaydi 🏷\n"
@@ -771,7 +771,7 @@ def t_ru(k, **kw):
         "start_choose": "Здравствуйте, пожалуйста, выберите язык бота.",
         "ask_name": "Давайте знакомиться, как вас зовут?",
         "welcome":(
-            "Добро пожаловать! 👋\n\n"
+            "Добро пожаловать, {name}! 👋\n\n"
             "📊 MoliyaUz — ваш ассистент по личным финансам.\n"
             "— Понимает доходы/расходы из текста 💬\n"
             "— Автокатегоризация 🏷\n"
@@ -1469,6 +1469,12 @@ async def start(m:Message):
     USER_ACTIVATED[uid] = True
     SEEN_USERS.add(uid)
     TRIAL_START.setdefault(uid, now_tk())
+    profile = USERS_PROFILE_CACHE.get(uid)
+    lang_pref = None
+    if isinstance(profile, dict):
+        lang_pref = profile.get("lang")
+    if lang_pref:
+        USER_LANG[uid] = lang_pref
     await ensure_month_rollover()
     nav_reset(uid)
     payload = ""
@@ -1478,16 +1484,23 @@ async def start(m:Message):
             payload = parts[1].strip()
     if await handle_paid_deeplink(uid, payload, m):
         return
-    STEP[uid]="lang"
-    await m.answer(t_uz("start_choose"), reply_markup=kb_lang())
+    if profile:
+        lang = lang_pref or get_lang(uid)
+        USER_LANG[uid] = lang
+        STEP[uid] = "main"
+        await ensure_subscription_state(uid)
+        await m.answer(L(lang)("menu"), reply_markup=get_main_menu(lang))
+    else:
+        STEP[uid]="lang"
+        await m.answer(t_uz("start_choose"), reply_markup=kb_lang())
 
-    # Debugging helper: log chat type and ID for group setup
-    logger.info(
-        "start-command chat-info type=%s id=%s title=%s",
-        m.chat.type,
-        m.chat.id,
-        getattr(m.chat, "title", ""),
-    )
+        # Debugging helper: log chat type and ID for group setup
+        logger.info(
+            "start-command chat-info type=%s id=%s title=%s",
+            m.chat.type,
+            m.chat.id,
+            getattr(m.chat, "title", ""),
+        )
 
 @rt.message(Command("menu"))
 async def menu_cmd(m: Message):
@@ -1597,16 +1610,25 @@ async def on_text(m:Message):
             if "uz" in low or "o‘z" in low or "o'z" in low: USER_LANG[uid]="uz"
             elif "рус" in low or "ru" in low: USER_LANG[uid]="ru"
             else: return
-            update_user_profile(uid, lang=get_lang(uid))
-            STEP[uid]="name"
-            await m.answer((t_uz if get_lang(uid)=="uz" else t_ru)("ask_name"), reply_markup=ReplyKeyboardRemove()); return
+            lang = get_lang(uid)
+            existing_raw = USERS_PROFILE_CACHE.get(uid)
+            existing = existing_raw if isinstance(existing_raw, dict) else {}
+            raw_name = existing.get("name")
+            if not raw_name:
+                raw_name = (m.from_user.full_name or m.from_user.first_name or m.from_user.username or "") if m.from_user else ""
+            fallback_name = raw_name or ("do‘stim" if lang == "uz" else "друг")
+            update_user_profile(uid, lang=lang, name=raw_name or None)
+            STEP[uid]="need_phone"
+            await m.answer(L(lang)("welcome", name=fallback_name), reply_markup=kb_share(lang))
+            await m.answer("—", reply_markup=kb_oferta(lang)); return
 
         if step=="name":
             lang=get_lang(uid); T=L(lang)
             clean_name = t.strip()
             if clean_name:
                 update_user_profile(uid, name=clean_name, lang=lang)
-            await m.answer(T("welcome"), reply_markup=kb_share(lang))
+            display_name = clean_name or (m.from_user.full_name if m.from_user else "") or ("do‘stim" if lang=="uz" else "друг")
+            await m.answer(T("welcome", name=display_name), reply_markup=kb_share(lang))
             await m.answer("—", reply_markup=kb_oferta(lang))
             STEP[uid]="need_phone"; return
 
@@ -2540,7 +2562,7 @@ async def subscription_reminder_loop():
                     try:
                         await bot.send_message(
                             user_id,
-                            T("sub_remind_1d", end=until_local.strftime("%d.%m.%Y %H:%M")),
+                            T("sub_remind_1d", end=until_local.strftime("%d.%m.%Y")),
                         )
                         await mark_reminder_sent(user_id)
                     except Exception as exc:
