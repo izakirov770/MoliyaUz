@@ -192,7 +192,8 @@ async def on_manual_activation_request(callback: types.CallbackQuery):
     PENDING_MANUAL_DIGITS[callback.from_user.id]["invoice_id"] = invoice_id
 
     await callback.message.answer(
-        "Iltimos, to‘lov qilingan kartaning oxirgi 4 raqamini yuboring. Masalan: 1234"
+        "Iltimos, to‘lov qilingan kartaning oxirgi 4 raqamini yuboring. Masalan: 1234."
+        "\nObuna 10 daqiqagacha ichida faollashadi va tasdiq xabarini olasiz."
     )
     await callback.answer("Ko‘rsatma yuborildi")
 
@@ -225,6 +226,7 @@ async def on_manual_last_four(message: types.Message):
     if not REVIEW_CHAT_ID:
         await message.answer(
             "Ma’lumot qabul qilindi. Administrator so‘rovni qo‘lda ko‘rib chiqadi."
+            " 10 daqiqagacha ichida obunangiz faollashgani haqida xabar beramiz."
         )
         return
 
@@ -266,7 +268,8 @@ async def on_manual_last_four(message: types.Message):
         return
 
     await message.answer(
-        "Rahmat! Administratorlar so‘rovni ko‘rib chiqishadi. Tasdiqlangandan so‘ng obuna faollashadi."
+        "Rahmat! Administratorlar so‘rovni ko‘rib chiqishadi."
+        " 10 daqiqagacha ichida obunangiz faollashgani haqida xabar beramiz."
     )
 
 

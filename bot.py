@@ -83,7 +83,7 @@ if _BOT_MODULE_PATH.exists():
 # ====== EXTERNAL MODULES ======
 from bot.routers.subscription_plans import sub_router
 from bot.routers.pay_debug import pay_debug_router
-from subscription import subscription_router
+from subscription import PENDING_MANUAL_DIGITS, subscription_router
 
 # ====== BOT ======
 proxy_url = os.getenv("TELEGRAM_PROXY", "").strip()
@@ -735,6 +735,10 @@ def t_uz(k,**kw):
         "sub_activated":"✅ Obuna faollashtirildi: {plan} (gacha {until})",
         "pay_click":"CLICK orqali to‘lash","pay_check":"To‘lovni tekshirish",
         "sub_manual_btn":"Obunani faollashtirish",
+        "sub_manual_prompt":(
+            "To‘lov qilingan kartangizning oxirgi 4 raqamini yuboring.\n"
+            "Obuna 10 daqiqagacha ichida faollashadi va tasdiq xabarini olasiz."
+        ),
         "pay_checking":"🔄 To‘lov holati tekshirilmoqda…","pay_notfound":"To‘lov topilmadi yoki tasdiqlanmagan.",
         "pay_status_paid":"✅ To‘lov tasdiqlandi: {plan}\nObuna {until} gacha faollashtirildi.",
         "pay_status_pending":"⏳ To‘lov hali tasdiqlanmadi. Birozdan so‘ng qayta tekshiring.",
@@ -891,6 +895,10 @@ def t_ru(k, **kw):
         "sub_activated": "✅ Подписка активирована: {plan} (до {until})",
         "pay_click": "Оплатить в CLICK", "pay_check": "Проверить платеж",
         "sub_manual_btn": "Активировать подписку",
+        "sub_manual_prompt":(
+            "Отправьте последние 4 цифры оплаченной карты.\n"
+            "Подписка активируется в течение 10 минут, и мы уведомим вас о подтверждении."
+        ),
         "pay_checking": "🔄 Проверяем статус платежа…", "pay_notfound": "Платеж не найден или не подтвержден.",
         "pay_status_paid": "✅ Платеж подтвержден: {plan}\nПодписка активна до {until}.",
         "pay_status_pending": "⏳ Платеж ещё не подтвержден. Попробуйте снова чуть позже.",
@@ -1530,6 +1538,10 @@ async def on_text(m:Message):
         await ensure_month_rollover()
         await ensure_subscription_state(uid)
 
+        if PENDING_MANUAL_DIGITS.get(uid):
+            # Waiting for manual activation digits; let subscription router handle input
+            return
+
         if t == T("btn_back"):
             await handle_back_button(m, uid, lang)
             return
@@ -1749,24 +1761,14 @@ async def on_text(m:Message):
         if t==T("sub_manual_btn"):
             record = await payments_get_latest_payment(uid)
             status = (record.get("status") or "").lower() if record else ""
-            if not record or status == "paid":
+            if not record or status != "pending":
                 await send_subscription_invoice_message(uid, lang, "month", m)
                 return
 
             invoice_id = record.get("invoice_id")
-            amount_raw = record.get("amount")
-            try:
-                amount_val = Decimal(str(amount_raw or "0")).quantize(Decimal("1"))
-            except Exception:
-                amount_val = Decimal("0")
-
-            plan_label = T("sub_month")
-            amount_display = f"{int(amount_val):,}".replace(",", " ") if amount_val else str(amount_raw)
-            pay_link = create_click_link(invoice_id, int(amount_val) if amount_val else MONTH_PLAN_PRICE)
-            await m.answer(
-                T("sub_created", plan=plan_label, amount=amount_display),
-                reply_markup=kb_payment(invoice_id, pay_link, lang),
-            )
+            entry = PENDING_MANUAL_DIGITS.setdefault(uid, {})
+            entry["invoice_id"] = invoice_id
+            await m.answer(T("sub_manual_prompt"))
             return
 
         if t==T("pay_check"):
