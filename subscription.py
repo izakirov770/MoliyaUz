@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
+import re
 
 import aiosqlite
 from aiogram import F, Router, types
@@ -12,24 +12,21 @@ from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from zoneinfo import ZoneInfo
 
-from keyboards.inline import (
-    subscription_check_only_kb,
-    subscription_payment_kb,
-    subscription_plans_kb,
-)
+from keyboards.inline import subscription_payment_kb, subscription_plans_kb
 from payments import (
+    attach_manual_request_message,
+    create_manual_activation_request,
     create_polling_payment,
+    get_manual_activation_request,
     get_payment_by_invoice,
-    get_recent_pending_payment,
     mark_polling_payment_paid,
+    update_manual_request_status,
     update_user_subscription_fields,
 )
 from payments.click_polling import (
-    CLICK_POLLING_ENABLED,
     PLAN_MONTH_KEY,
     PLAN_WEEK_KEY,
     build_click_pay_url,
-    check_click_status,
     get_plan_amount,
 )
 from db import DB_PATH
@@ -54,6 +51,14 @@ if admin_id_main:
         ADMIN_IDS.add(int(admin_id_main))
     except Exception:
         pass
+
+REVIEW_CHAT_ID_RAW = os.getenv("SUBSCRIPTION_REVIEW_CHAT_ID", "0").strip()
+try:
+    REVIEW_CHAT_ID = int(REVIEW_CHAT_ID_RAW or "0")
+except Exception:
+    REVIEW_CHAT_ID = 0
+
+PENDING_MANUAL_DIGITS: dict[int, dict[str, str]] = {}
 
 
 # [SUBSCRIPTION-POLLING-BEGIN]
@@ -153,132 +158,207 @@ async def _finalize_paid(
 
 @subscription_router.message(Command("subscription"))
 async def subscription_menu(message: types.Message):
-    if not CLICK_POLLING_ENABLED:
-        kb = InlineKeyboardBuilder()
-        kb.button(
-            text="💳 Оплатить через CLICK",
-            url="http://127.0.0.1:8000/clickpay/click_form.html",
-        )
-        await message.answer("Obuna uchun to‘lov sahifasini tanlang 👇", reply_markup=kb.as_markup())
-        return
-    await message.answer("Obuna tarifini tanlang:", reply_markup=subscription_plans_kb())
+    await message.answer(
+        "Obuna tarifini tanlang:", reply_markup=subscription_plans_kb()
+    )
     await _send_status(message)
-
-
-@subscription_router.callback_query(F.data == "subpoll:weekly")
-async def on_choose_weekly(callback: types.CallbackQuery):
-    if not CLICK_POLLING_ENABLED:
-        await callback.answer()
-        return
-    await _create_invoice_for_plan(callback.message, PLAN_WEEK_KEY)
-    await callback.answer("Tarif tanlandi")
 
 
 @subscription_router.callback_query(F.data == "subpoll:monthly")
 async def on_choose_monthly(callback: types.CallbackQuery):
-    if not CLICK_POLLING_ENABLED:
-        await callback.answer()
-        return
     await _create_invoice_for_plan(callback.message, PLAN_MONTH_KEY)
     await callback.answer("Tarif tanlandi")
 
 
-@subscription_router.callback_query(F.data.startswith("subpoll:check"))
-async def on_check_subscription(callback: types.CallbackQuery):
-    if not CLICK_POLLING_ENABLED:
-        await callback.answer()
-        return
+@subscription_router.callback_query(F.data.startswith("subpoll:manual"))
+async def on_manual_activation_request(callback: types.CallbackQuery):
     parts = callback.data.split(":")
-    merchant_trans_id = parts[2] if len(parts) > 2 and parts[2] else None
-    if not merchant_trans_id:
-        record = await get_recent_pending_payment(callback.from_user.id)
-        if not record:
-            await callback.message.answer("Aktiv invoice topilmadi.")
-            await callback.answer()
-            return
-        merchant_trans_id = record.get("invoice_id")
-    attempts = 3
-    delay_seconds = 2
-    check_result = {}
-    for attempt in range(attempts):
-        check_result = await check_click_status(merchant_trans_id)
-        print("CLICK STATUS DEBUG", merchant_trans_id, attempt, check_result)
-        if check_result.get("status") == "error" and check_result.get("error"):
-            break
-        if check_result.get("paid"):
-            break
-        if attempt < attempts - 1:
-            await asyncio.sleep(delay_seconds)
-
-    if check_result.get("status") == "error" and check_result.get("error"):
-        await callback.message.answer("Hozir tekshirib bo‘lmadi, birozdan so‘ng urinib ko‘ring.")
-        await callback.answer()
+    invoice_id = parts[2] if len(parts) > 2 and parts[2] else None
+    if not invoice_id:
+        await callback.answer("Invoice topilmadi.", show_alert=True)
         return
 
-    if not check_result.get("paid"):
-        await callback.message.answer(
-            "To‘lov topilmadi. Agar to‘lagan bo‘lsangiz, yana ‘Davom etish’ni bosing.",
-            reply_markup=subscription_check_only_kb(merchant_trans_id),
-        )
-        await callback.answer()
-        return
+    if callback.from_user.id not in PENDING_MANUAL_DIGITS:
+        PENDING_MANUAL_DIGITS[callback.from_user.id] = {}
+    PENDING_MANUAL_DIGITS[callback.from_user.id]["invoice_id"] = invoice_id
 
-    data = check_result.get("payload") or {}
-    status = check_result.get("status", "")
-    record = await get_payment_by_invoice(merchant_trans_id)
-    if not record:
-        await callback.message.answer("To‘lov yozuvi topilmadi.")
-        await callback.answer()
-        return
-    if (record.get("status") or "").lower() == "paid":
-        paid_at = record.get("paid_at")
-        try:
-            paid_dt = datetime.fromisoformat(paid_at) if paid_at else datetime.now(timezone.utc)
-        except Exception:
-            paid_dt = datetime.now(timezone.utc)
-        expires_at = paid_dt + _plan_delta(record.get("plan") or PLAN_MONTH_KEY)
-        await callback.message.answer(
-            "Obuna allaqachon faollashtirilgan ✅\n"
-            f"Tarif: {_plan_label(record.get('plan'))}\n"
-            f"Amal qiladi: {expires_at.strftime('%d.%m.%Y %H:%M')}"
-        )
-        await callback.answer()
-        return
-    stored_amount = f"{float(record.get('amount', 0)):.2f}"
-    remote_amount = data.get("amount") or data.get("amount_sum")
-    if remote_amount is not None:
-        try:
-            remote_amount = f"{float(remote_amount):.2f}"
-        except Exception:
-            remote_amount = str(remote_amount)
-        if remote_amount != stored_amount:
-            await callback.message.answer("Summalarda farq bor. Administrator bilan bog‘laning.")
-            await callback.answer()
-            return
-    paid_at_raw = data.get("perform_time") or data.get("payment_time") or data.get("paid_time")
-    try:
-        paid_at = datetime.fromisoformat(paid_at_raw)
-    except Exception:
-        paid_at = datetime.now(timezone.utc)
-    if paid_at.tzinfo is None:
-        paid_at = paid_at.replace(tzinfo=timezone.utc)
-    plan_key = record.get("plan") or PLAN_MONTH_KEY
-    expires_at = await _finalize_paid(
-        callback.from_user.id,
-        plan_key,
-        paid_at,
-        merchant_trans_id,
-        {
-            "status_code": check_result.get("status_code"),
-            "status": check_result.get("status"),
-            "payload": data,
-        },
-    )
     await callback.message.answer(
-        "Obuna faollashdi ✅\n"
-        f"Tarif: {_plan_label(plan_key)}\n"
-        f"Amal qiladi: {expires_at.strftime('%d.%m.%Y %H:%M')}"
+        "Iltimos, to‘lov qilingan kartaning oxirgi 4 raqamini yuboring. Masalan: 1234"
     )
+    await callback.answer("Ko‘rsatma yuborildi")
+
+
+@subscription_router.message(F.text)
+async def on_manual_last_four(message: types.Message):
+    pending = PENDING_MANUAL_DIGITS.get(message.from_user.id)
+    if not pending:
+        return
+
+    text = (message.text or "").strip()
+    if text.lower() in {"/cancel", "bekor", "cancel"}:
+        PENDING_MANUAL_DIGITS.pop(message.from_user.id, None)
+        await message.answer("So‘rov bekor qilindi.")
+        return
+
+    digits = re.sub(r"\D", "", text)
+    if len(digits) != 4:
+        await message.answer("Faqat kartaning oxirgi 4 raqamini yuboring. Masalan: 1234")
+        return
+
+    invoice_id = pending.get("invoice_id")
+    PENDING_MANUAL_DIGITS.pop(message.from_user.id, None)
+
+    record = await create_manual_activation_request(message.from_user.id, invoice_id, digits)
+    if not record:
+        await message.answer("So‘rovni saqlashda xatolik. Administrator bilan bog‘laning.")
+        return
+
+    if not REVIEW_CHAT_ID:
+        await message.answer(
+            "Ma’lumot qabul qilindi. Administrator so‘rovni qo‘lda ko‘rib chiqadi."
+        )
+        return
+
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="Obunani faollashtirish ✅",
+        callback_data=f"subpoll:approve:{record['id']}",
+    )
+    builder.adjust(1)
+
+    tz = ZoneInfo(os.getenv("TZ", "Asia/Tashkent"))
+    submitted_at = datetime.now(timezone.utc).astimezone(tz)
+    username = f" @{message.from_user.username}" if message.from_user.username else ""
+    admin_text = (
+        "🆕 Yangi obuna so‘rovi\n"
+        f"So‘rov ID: {record['id']}\n"
+        f"Foydalanuvchi: {message.from_user.full_name}{username} (ID: {message.from_user.id})\n"
+        f"Invoice: {invoice_id or '—'}\n"
+        f"Karta oxirgi 4 raqami: {digits}\n"
+        f"Yuborilgan: {submitted_at.strftime('%d.%m.%Y %H:%M')}"
+    )
+
+    try:
+        admin_message = await message.bot.send_message(
+            REVIEW_CHAT_ID,
+            admin_text,
+            reply_markup=builder.as_markup(),
+        )
+        await attach_manual_request_message(record["id"], REVIEW_CHAT_ID, admin_message.message_id)
+    except Exception as exc:
+        logger.warning(
+            "manual-request-dispatch-failed",
+            extra={"error": str(exc), "request_id": record["id"]},
+        )
+        await message.answer(
+            "So‘rov qabul qilindi, ammo administratorlarga xabar yuborilmadi."
+            " Iltimos, qo‘lda bog‘laning."
+        )
+        return
+
+    await message.answer(
+        "Rahmat! Administratorlar so‘rovni ko‘rib chiqishadi. Tasdiqlangandan so‘ng obuna faollashadi."
+    )
+
+
+@subscription_router.callback_query(F.data.startswith("subpoll:approve"))
+async def on_manual_approve(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Ruxsat yo‘q", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    try:
+        request_id = int(parts[2]) if len(parts) > 2 else 0
+    except Exception:
+        request_id = 0
+    if not request_id:
+        await callback.answer("So‘rov ID noto‘g‘ri.", show_alert=True)
+        return
+
+    request = await get_manual_activation_request(request_id)
+    if not request:
+        await callback.answer("So‘rov topilmadi.", show_alert=True)
+        return
+    if (request.get("status") or "").lower() != "pending":
+        await callback.answer("So‘rov allaqachon ko‘rib chiqilgan.")
+        return
+
+    user_id = request.get("user_id")
+    if not user_id:
+        await callback.answer("Foydalanuvchi aniqlanmadi.", show_alert=True)
+        return
+
+    invoice_id = request.get("invoice_id")
+    payment_record = await get_payment_by_invoice(invoice_id) if invoice_id else None
+    plan_key = (payment_record.get("plan") if payment_record else None) or PLAN_MONTH_KEY
+
+    approved_at = datetime.now(timezone.utc)
+    expires_at = approved_at + _plan_delta(plan_key)
+
+    await update_user_subscription_fields(
+        user_id,
+        approved_at.isoformat(),
+        expires_at.isoformat(),
+    )
+
+    payload = {
+        "manual": True,
+        "approved_by": callback.from_user.id,
+        "approved_at": approved_at.isoformat(),
+        "request_id": request_id,
+        "last_four": request.get("last_four"),
+    }
+    try:
+        if invoice_id:
+            await mark_polling_payment_paid(invoice_id, payload, expires_at.isoformat())
+    except Exception as exc:
+        logger.warning(
+            "manual-approve-payment-update-failed",
+            extra={"error": str(exc), "invoice_id": invoice_id},
+        )
+
+    updated_request = await update_manual_request_status(
+        request_id,
+        "approved",
+        approved_by=callback.from_user.id,
+        approved_at_iso=approved_at.isoformat(),
+    )
+
+    tz = ZoneInfo(os.getenv("TZ", "Asia/Tashkent"))
+    expires_local = expires_at.astimezone(tz)
+    plan_label = _plan_label(plan_key)
+
+    try:
+        await callback.bot.send_message(
+            user_id,
+            "Obunangiz qo‘lda tasdiqlandi ✅\n"
+            f"Tarif: {plan_label}\n"
+            f"Amal qiladi: {expires_local.strftime('%d.%m.%Y %H:%M')} gacha",
+        )
+    except Exception as exc:
+        logger.warning(
+            "manual-approve-notify-failed",
+            extra={"error": str(exc), "user_id": user_id},
+        )
+
+    admin_username = (
+        f" @{callback.from_user.username}" if callback.from_user.username else ""
+    )
+    admin_summary = (
+        "✅ Obuna tasdiqlandi\n"
+        f"So‘rov ID: {request_id}\n"
+        f"Foydalanuvchi ID: {user_id}\n"
+        f"Tarif: {plan_label}\n"
+        f"Amal qilish muddati: {expires_local.strftime('%d.%m.%Y %H:%M')}\n"
+        f"Tasdiqladi: {callback.from_user.full_name}{admin_username} (ID: {callback.from_user.id})"
+    )
+
+    try:
+        await callback.message.edit_text(admin_summary)
+    except Exception:
+        pass
+
     await callback.answer("Tasdiqlandi")
 
 # [SUBSCRIPTION-POLLING-END]
@@ -306,13 +386,7 @@ async def manual_activate(message: types.Message):
         await message.answer("Invoice foydalanuvchisi aniqlanmadi.")
         return
 
-    plan_key = record.get("plan") or plan_arg
-    if plan_key in {"weekly", "week", "hafta"}:
-        plan_key = PLAN_WEEK_KEY
-    elif plan_key in {"monthly", "month", "oy"}:
-        plan_key = PLAN_MONTH_KEY
-    if plan_key not in {PLAN_WEEK_KEY, PLAN_MONTH_KEY}:
-        plan_key = PLAN_MONTH_KEY
+    plan_key = PLAN_MONTH_KEY
 
     paid_at_utc = datetime.now(timezone.utc)
     expires_at_utc = paid_at_utc + _plan_delta(plan_key)

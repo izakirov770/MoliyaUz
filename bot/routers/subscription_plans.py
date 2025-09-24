@@ -12,14 +12,12 @@ def _db():
     return sqlite3.connect(os.getenv("DB_PATH", "moliya.db"))
 
 MONTH_PRICE = int(os.getenv("MONTH_PRICE", 19900))
-WEEK_PRICE = int(os.getenv("WEEK_PRICE", 7900))
 
 async def show_subscription_plans(message: Message):
-    inv_m, url_m = create_invoice(message.from_user.id, MONTH_PRICE, "month")
-    inv_w, url_w = create_invoice(message.from_user.id, WEEK_PRICE, "week")
+    _, url_m = create_invoice(message.from_user.id, MONTH_PRICE, "month")
+    price_display = f"{MONTH_PRICE:,}".replace(",", " ")
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⭐ 1 oylik — 19 900 so'm", url=url_m)],
-        [InlineKeyboardButton(text="🧪 1 haftalik — 7 900 so'm", url=url_w)],
+        [InlineKeyboardButton(text=f"⭐ 1 oylik — {price_display} so'm", url=url_m)],
         [InlineKeyboardButton(text="🔄 To‘lovni tekshirish", callback_data="pay_check")]
     ])
     await message.answer("Obuna turini tanlang:", reply_markup=kb)

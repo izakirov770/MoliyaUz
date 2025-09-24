@@ -9,6 +9,7 @@ from urllib.parse import quote_plus, urlencode, urlparse, urlunparse, parse_qsl
 from typing import Optional, Dict, List, Tuple, Any
 
 from aiogram import Bot, Dispatcher, F, Router, BaseMiddleware
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.client.default import DefaultBotProperties
@@ -27,6 +28,7 @@ from payments import (
     ensure_schema as ensure_payment_schema,
     get_latest_payment as payments_get_latest_payment,
     mark_payment_paid as payments_mark_payment_paid,
+    users_for_expiry_reminder as payments_users_for_expiry_reminder,
 )
 from services.payments import create_invoice_id, build_miniapp_url
 
@@ -84,7 +86,13 @@ from bot.routers.pay_debug import pay_debug_router
 from subscription import subscription_router
 
 # ====== BOT ======
-bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
+proxy_url = os.getenv("TELEGRAM_PROXY", "").strip()
+session = AiohttpSession(proxy=proxy_url) if proxy_url else None
+bot = Bot(
+    BOT_TOKEN,
+    session=session,
+    default=DefaultBotProperties(parse_mode="HTML"),
+)
 dp = Dispatcher()
 rt = Router()
 reports_range_router = Router()
@@ -2311,10 +2319,10 @@ async def send_subscription_invoice_message(uid: int, lang: str, code: str, mess
         days = 30
         price = MONTH_PLAN_PRICE
     amount_dec = Decimal(price)
-    invoice_id = await payments_create_invoice(uid, amount_dec, "UZS")
-    pid = str(invoice_id)
     plan_info = payments_detect_plan(amount_dec)
     plan_key = plan_info[0] if plan_info else None
+    invoice_id = await payments_create_invoice(uid, amount_dec, "UZS", plan_key)
+    pid = str(invoice_id)
     PENDING_PAYMENTS[pid] = {
         "uid": uid,
         "invoice_id": pid,
@@ -2460,6 +2468,51 @@ def _sec_until(h:int,mn:int=0):
     if t<=n: t+=timedelta(days=1)
     return (t-n).total_seconds()
 
+async def subscription_reminder_loop():
+    logger = logging.getLogger(__name__)
+    while True:
+        try:
+            now_utc = datetime.now(timezone.utc)
+            cutoff_iso = (now_utc + timedelta(days=1)).isoformat()
+            candidates = await payments_users_for_expiry_reminder(cutoff_iso)
+            if candidates:
+                for item in candidates:
+                    user_id = item.get("user_id")
+                    sub_until_raw = item.get("sub_until")
+                    if not user_id or not sub_until_raw:
+                        continue
+                    try:
+                        until_dt = datetime.fromisoformat(str(sub_until_raw))
+                    except Exception:
+                        continue
+                    if until_dt.tzinfo is None:
+                        until_dt = until_dt.replace(tzinfo=timezone.utc)
+                    time_left = until_dt - now_utc
+                    if time_left <= timedelta(0):
+                        await mark_reminder_sent(user_id)
+                        continue
+                    if time_left > timedelta(days=1):
+                        continue
+                    await ensure_subscription_state(user_id)
+                    lang = get_lang(user_id)
+                    T = L(lang)
+                    until_local = until_dt.astimezone(TASHKENT)
+                    try:
+                        await bot.send_message(
+                            user_id,
+                            T("sub_remind_1d", end=until_local.strftime("%d.%m.%Y %H:%M")),
+                        )
+                        await mark_reminder_sent(user_id)
+                    except Exception as exc:
+                        logger.warning(
+                            "subscription-reminder-send-failed",
+                            extra={"user_id": user_id, "error": str(exc)},
+                        )
+        except Exception as exc:
+            logger.warning("subscription-reminder-loop-error", exc_info=exc)
+        await asyncio.sleep(3600)
+
+
 async def daily_reminder():
     schedule = ((8, "morning_ping"), (20, "evening_ping"))
     while True:
@@ -2579,6 +2632,7 @@ async def main():
     sample_url = build_miniapp_url(WEB_BASE, MONTH_PLAN_PRICE, sample_invoice, sample_return)
     print("MINI_APP_URL_FOR_BOTFATHER:", MINI_APP_BASE_URL)
     print("TEST_URL_SAMPLE:", sample_url)
+    asyncio.create_task(subscription_reminder_loop())
     asyncio.create_task(daily_reminder())
     asyncio.create_task(debt_reminder())
     print("Bot ishga tushdi."); await dp.start_polling(bot)

@@ -39,8 +39,23 @@ CREATE TABLE IF NOT EXISTS payments_logs(
 );
 """
 
+MANUAL_REQUESTS_TABLE = """
+CREATE TABLE IF NOT EXISTS manual_activation_requests(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id BIGINT NOT NULL,
+    invoice_id TEXT,
+    last_four TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    admin_chat_id BIGINT,
+    admin_message_id BIGINT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    approved_by BIGINT,
+    approved_at TIMESTAMP,
+    notes TEXT
+);
+"""
+
 PLAN_BY_AMOUNT: Dict[Decimal, Tuple[str, int]] = {
-    Decimal("7900"): ("sub_week", 7),
     Decimal("19900"): ("sub_month", 30),
 }
 
@@ -54,6 +69,7 @@ async def ensure_schema() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(PAYMENTS_TABLE)
         await db.execute(PAYMENTS_LOGS_TABLE)
+        await db.execute(MANUAL_REQUESTS_TABLE)
         await _ensure_polling_columns(db)
         await db.commit()
     _schema_ready = True
@@ -163,21 +179,109 @@ async def mark_polling_payment_paid(
         updated["expires_at"] = expires_at_iso
     return updated
 
+
+async def create_manual_activation_request(
+    user_id: int,
+    invoice_id: Optional[str],
+    last_four: str,
+) -> Optional[Dict[str, Any]]:
+    await ensure_schema()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO manual_activation_requests(user_id, invoice_id, last_four, status) "
+            "VALUES(?, ?, ?, 'pending')",
+            (user_id, invoice_id, last_four),
+        )
+        await db.commit()
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM manual_activation_requests WHERE id = last_insert_rowid()"
+        )
+        row = await cur.fetchone()
+    return dict(row) if row else None
+
+
+async def attach_manual_request_message(
+    request_id: int,
+    admin_chat_id: int,
+    admin_message_id: int,
+) -> None:
+    await ensure_schema()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE manual_activation_requests SET admin_chat_id=?, admin_message_id=? WHERE id=?",
+            (admin_chat_id, admin_message_id, request_id),
+        )
+        await db.commit()
+
+
+async def get_manual_activation_request(request_id: int) -> Optional[Dict[str, Any]]:
+    await ensure_schema()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM manual_activation_requests WHERE id=?",
+            (request_id,),
+        )
+        row = await cur.fetchone()
+    return dict(row) if row else None
+
+
+async def update_manual_request_status(
+    request_id: int,
+    status: str,
+    approved_by: Optional[int] = None,
+    approved_at_iso: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    await ensure_schema()
+    updates = ["status=?"]
+    params: list[Any] = [status]
+    if approved_by is not None:
+        updates.append("approved_by=?")
+        params.append(approved_by)
+    if approved_at_iso is not None:
+        updates.append("approved_at=?")
+        params.append(approved_at_iso)
+    params.append(request_id)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            f"UPDATE manual_activation_requests SET {', '.join(updates)} WHERE id=?",
+            params,
+        )
+        await db.commit()
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM manual_activation_requests WHERE id=?",
+            (request_id,),
+        )
+        row = await cur.fetchone()
+    return dict(row) if row else None
+
 # [SUBSCRIPTION-POLLING-END]
 
 
-async def create_invoice(user_id: int, amount: Decimal, currency: str) -> str:
+async def create_invoice(
+    user_id: int,
+    amount: Decimal,
+    currency: str,
+    plan_key: Optional[str] = None,
+) -> str:
     await ensure_schema()
     base = f"INV-{user_id}-{int(time.time())}"
     invoice_id = base
     attempt = 0
+    plan_code = plan_key
+    if plan_code is None:
+        plan = PLAN_BY_AMOUNT.get(amount)
+        if plan:
+            plan_code = plan[0]
     while True:
         try:
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute(
-                    "INSERT INTO payments(user_id, invoice_id, amount, currency, status, created_at) "
-                    "VALUES(?,?,?,?, 'pending', CURRENT_TIMESTAMP)",
-                    (user_id, invoice_id, str(amount), currency),
+                    "INSERT INTO payments(user_id, invoice_id, amount, currency, status, created_at, plan) "
+                    "VALUES(?,?,?,?, 'pending', CURRENT_TIMESTAMP, ?)",
+                    (user_id, invoice_id, str(amount), currency, plan_code),
                 )
                 await db.commit()
             break
