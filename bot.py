@@ -776,6 +776,7 @@ def t_uz(k,**kw):
         "debt_saved_given":"💸 Qarz (Qarzdor) qo‘shildi:\nKim: {who}\nSumma: {cur} {amount}\nQaytarish sanasi: {due}",
         "debt_need":"Qarz matnini tushunmadim. Ism va summani yozing.",
         "date_need":"Sanani tushunmadim. Masalan: 25.09.2025 yoki ertaga.",
+        "debt_cancelled":"❌ Qarz yozuvi bekor qilindi.",
         "card_debt":"— — —\n<b>QARZ</b>\nSana: {created}\nKim: {who}\nKategoriya: 💳 Qarzlar\nSumma: {cur} {amount}\nYo'nalish: {direction}\nBerilgan sana: {created}\nQaytadigan sana: {due}\nHolati: {status}",
         "debt_dir_mine":"Qarz olindi",
         "debt_dir_given":"Qarz berildi",
@@ -944,6 +945,7 @@ def t_ru(k, **kw):
         "debt_saved_given": "💸 Добавлен должник:\nКто: {who}\nСумма: {cur} {amount}\nДата возврата: {due}",
         "debt_need": "Не понял долг. Укажите имя и сумму.",
         "date_need": "Не понял дату. Например: 25.09.2025 или завтра.",
+        "debt_cancelled": "❌ Запись о долге удалена.",
         "card_debt": "— — —\n<b>ДОЛГ</b>\nСоздано: {created}\nКто/Кому: {who}\nКатегория: 💳 Долги\nСумма: {cur} {amount}\nНаправление: {direction}\nДата выдачи: {created}\nДата возврата: {due}\nСтатус: {status}",
         "debt_dir_mine": "Долг взяли",
         "debt_dir_given": "Долг выдали",
@@ -1209,9 +1211,15 @@ def kb_debt_menu(lang="uz"):
 def kb_debt_done(direction,debt_id, lang="uz"):
     T=L(lang)
     lab=T("btn_paid") if direction=="mine" else T("btn_rcv")
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=lab,callback_data=f"debtdone:{direction}:{debt_id}")]
-    ])
+    cancel_text = "❌ Bekor qilish" if lang == "uz" else "❌ Отменить"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=lab, callback_data=f"debtdone:{direction}:{debt_id}"),
+                InlineKeyboardButton(text=cancel_text, callback_data=f"debtcancel:{debt_id}"),
+            ]
+        ]
+    )
 
 def kb_sub(lang="uz"):
     T=L(lang)
@@ -1904,15 +1912,22 @@ async def on_text(m:Message):
             due_val = parse_due_date(entry)
 
             if due_val:
-                await save_debt(uid, "mine" if kind_label == "debt_mine" else "given", amount_val, curr_val, who_val, due_val)
+                debt_direction = "mine" if kind_label == "debt_mine" else "given"
+                debt_id = await save_debt(uid, debt_direction, amount_val, curr_val, who_val, due_val)
 
                 # Debt create moment -> balansga darhol ta'sir
                 if kind_label == "debt_mine":
                     await save_tx(uid, "income", amount_val, curr_val, "cash", "💳 Qarz olindi", "")
-                    await m.answer(T("debt_saved_mine", who=who_val, cur=curr_val, amount=fmt_amount(amount_val), due=due_val))
+                    await m.answer(
+                        T("debt_saved_mine", who=who_val, cur=curr_val, amount=fmt_amount(amount_val), due=due_val),
+                        reply_markup=kb_debt_done(debt_direction, debt_id, lang),
+                    )
                 else:
                     await save_tx(uid, "expense", amount_val, curr_val, "cash", "💳 Qarz berildi", "")
-                    await m.answer(T("debt_saved_given", who=who_val, cur=curr_val, amount=fmt_amount(amount_val), due=due_val))
+                    await m.answer(
+                        T("debt_saved_given", who=who_val, cur=curr_val, amount=fmt_amount(amount_val), due=due_val),
+                        reply_markup=kb_debt_done(debt_direction, debt_id, lang),
+                    )
                 return True
 
             PENDING_DEBT[uid] = {
@@ -2304,10 +2319,41 @@ async def debt_done(c:CallbackQuery):
                     except Exception:
                         note_date = arch_dt
             text = debt_card(it, lang) + f"\n{T('debt_archive_note', date=note_date)}"
-            await c.message.edit_text(text)
-            await c.answer(("Holat yangilandi ✅" if lang=="uz" else "Статус обновлён ✅"))
-            return
+        await c.message.edit_text(text)
+        await c.answer(("Holat yangilandi ✅" if lang=="uz" else "Статус обновлён ✅"))
+        return
     await c.answer(("Topilmadi" if lang=="uz" else "Не найдено"), show_alert=True)
+
+@rt.callback_query(F.data.startswith("debtcancel:"))
+async def debt_cancel_cb(c: CallbackQuery):
+    uid = c.from_user.id
+    lang = get_lang(uid)
+    T = L(lang)
+    global DEBT_REMIND_SENT
+    try:
+        did = int(c.data.split(":", 1)[1])
+    except Exception:
+        await c.answer("Topilmadi" if lang == "uz" else "Не найдено", show_alert=True)
+        return
+
+    debts = MEM_DEBTS.get(uid, [])
+    for idx, item in enumerate(debts):
+        if item.get("id") == did:
+            debts.pop(idx)
+            DEBT_REMIND_SENT = {
+                entry for entry in DEBT_REMIND_SENT if not (entry[0] == uid and entry[1] == did)
+            }
+            if not debts:
+                MEM_DEBTS.pop(uid, None)
+            if c.message:
+                try:
+                    await c.message.edit_text(T("debt_cancelled"))
+                except Exception:
+                    await c.message.answer(T("debt_cancelled"))
+            await c.answer("Bekor qilindi" if lang == "uz" else "Отменено")
+            return
+
+    await c.answer("Topilmadi" if lang == "uz" else "Не найдено", show_alert=True)
 
 # ====== ANALIZ ======
 @rt.message(Command("analiz"))
