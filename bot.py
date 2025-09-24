@@ -69,6 +69,9 @@ CLICK_INCLUDE_RETURN_URL = os.getenv("CLICK_INCLUDE_RETURN_URL", "false").lower(
 
 NOTION_OFER_URL = "https://www.notion.so/OFERA-26a8fa17fd1f803f8025f07f98f89c87?source=copy_link"
 
+BOT_DESCRIPTION_TEXT = os.getenv("BOT_DESCRIPTION", "").strip()
+BOT_SHORT_DESCRIPTION_TEXT = os.getenv("BOT_SHORT_DESCRIPTION", "").strip()
+
 # ====== PACKAGE BRIDGE ======
 _BOT_MODULE_PATH = Path(__file__).resolve().parent / "bot"
 if _BOT_MODULE_PATH.exists():
@@ -175,6 +178,7 @@ DEBTS_ARCHIVE_FILE = Path("debts_archive.json")
 
 USERS_PROFILE_FILE = Path("users.json")
 USERS_PROFILE_CACHE: Dict[int, Dict[str, Any]] = {}
+BOT_DESCRIPTION_APPLIED = False
 
 
 class CardAddStates(StatesGroup):
@@ -449,6 +453,23 @@ async def update_bot_bio(total_users: int) -> None:
     except Exception:
         pass
 
+
+async def ensure_bot_description() -> None:
+    global BOT_DESCRIPTION_APPLIED
+    if BOT_DESCRIPTION_APPLIED:
+        return
+    if not (BOT_DESCRIPTION_TEXT or BOT_SHORT_DESCRIPTION_TEXT):
+        BOT_DESCRIPTION_APPLIED = True
+        return
+    try:
+        if BOT_SHORT_DESCRIPTION_TEXT:
+            await bot.set_my_short_description(BOT_SHORT_DESCRIPTION_TEXT)
+        if BOT_DESCRIPTION_TEXT:
+            await bot.set_my_description(BOT_DESCRIPTION_TEXT)
+    except Exception as exc:  # pragma: no cover
+        logging.getLogger(__name__).warning("set-bot-description-failed: %s", exc)
+    BOT_DESCRIPTION_APPLIED = True
+
 TRIAL_MIN = 15
 TRIAL_START: Dict[int,datetime] = {}
 SUB_EXPIRES: Dict[int,datetime] = {}
@@ -622,6 +643,14 @@ def t_uz(k,**kw):
             "Botdan foydalanib, <b>ofertamizga</b> rozilik bildirasiz.\n\n"
             "⏩ Davom etish uchun telefon raqamingizni yuboring:"
         ),
+        "welcome_back":(
+            "Xush kelibsiz, {name}! 👋\n\n"
+            "📊 MoliyaUz – shaxsiy moliyani avtomatik boshqaruvchi yordamchi.\n"
+            "— Matndan kirim/chiqimni tushunadi 💬\n"
+            "— Avto-kategoriyalab saqlaydi 🏷\n"
+            "— Qarz muddatini eslatadi ⏰\n\n"
+            "Davom etish uchun menyudagi bo‘limlardan foydalaning."
+        ),
         "btn_share":"📱 Telefon raqamni yuborish",
         "btn_oferta":"📄 Ofertamiz",
 
@@ -778,6 +807,14 @@ def t_ru(k, **kw):
             "— Напоминает о сроках долгов ⏰\n\n"
             "Продолжая, вы соглашаетесь с нашей <b>офертой</b>.\n\n"
             "⏩ Для продолжения отправьте свой номер телефона:"
+        ),
+        "welcome_back":(
+            "Рады видеть вас снова, {name}! 👋\n\n"
+            "📊 MoliyaUz — ваш ассистент по личным финансам.\n"
+            "— Понимает доходы/расходы из текста 💬\n"
+            "— Автокатегоризация 🏷\n"
+            "— Напоминает о сроках долгов ⏰\n\n"
+            "Следуйте дальше по меню, чтобы продолжить работу."
         ),
         "btn_share": "📱 Отправить номер телефона",
         "btn_oferta": "📄 Публичная оферта",
@@ -1477,6 +1514,7 @@ async def start(m:Message):
         USER_LANG[uid] = lang_pref
     await ensure_month_rollover()
     nav_reset(uid)
+    await ensure_bot_description()
     payload = ""
     if m.text:
         parts = m.text.split(maxsplit=1)
@@ -1485,22 +1523,21 @@ async def start(m:Message):
     if await handle_paid_deeplink(uid, payload, m):
         return
     if profile:
-        lang = lang_pref or get_lang(uid)
+        lang = (lang_pref or get_lang(uid)) or "uz"
         USER_LANG[uid] = lang
         STEP[uid] = "main"
         await ensure_subscription_state(uid)
+        display_name = profile.get("name") if isinstance(profile, dict) else None
+        if not display_name:
+            display_name = (m.from_user.full_name or m.from_user.first_name or m.from_user.username or "") if m.from_user else ""
+        if not display_name:
+            display_name = "do‘stim" if lang == "uz" else "друг"
+        await m.answer(L(lang)("welcome_back", name=display_name))
         await m.answer(L(lang)("menu"), reply_markup=get_main_menu(lang))
-    else:
-        STEP[uid]="lang"
-        await m.answer(t_uz("start_choose"), reply_markup=kb_lang())
+        return
 
-        # Debugging helper: log chat type and ID for group setup
-        logger.info(
-            "start-command chat-info type=%s id=%s title=%s",
-            m.chat.type,
-            m.chat.id,
-            getattr(m.chat, "title", ""),
-        )
+    STEP[uid]="lang"
+    await m.answer(t_uz("start_choose"), reply_markup=kb_lang())
 
 @rt.message(Command("menu"))
 async def menu_cmd(m: Message):
