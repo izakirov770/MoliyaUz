@@ -2539,12 +2539,20 @@ async def set_cmds():
         await bot.delete_my_commands()
         await bot.delete_my_commands(language_code="ru")
         await bot.delete_my_commands(language_code="uz")
-    except:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("delete-my-commands-failed: %s", exc)
     cmds = [BotCommand(command="start", description="Boshlash / Start")]
-    await bot.set_my_commands(cmds)
-    await bot.set_my_commands(cmds, language_code="ru")
-    await bot.set_my_commands(cmds, language_code="uz")
+    for lang_code in (None, "ru", "uz"):
+        try:
+            if lang_code:
+                await bot.set_my_commands(cmds, language_code=lang_code)
+            else:
+                await bot.set_my_commands(cmds)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "set-my-commands-failed lang=%s error=%s", lang_code or "default", exc
+            )
+            break
 
 # ====== MAIN ======
 async def main():
@@ -2562,7 +2570,10 @@ async def main():
     dp.include_router(pay_debug_router)
     dp.include_router(subscription_router)
     dp.include_router(rt)
-    await set_cmds()
+    try:
+        await set_cmds()
+    except Exception as exc:
+        logging.getLogger(__name__).warning("set_cmds_failed: %s", exc)
     sample_invoice = create_invoice_id(0)
     sample_return = _build_return_url(sample_invoice) or RETURN_URL
     sample_url = build_miniapp_url(WEB_BASE, MONTH_PLAN_PRICE, sample_invoice, sample_return)
