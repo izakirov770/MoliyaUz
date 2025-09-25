@@ -261,6 +261,10 @@ async def on_manual_last_four(message: types.Message):
         text="Obunani faollashtirish ✅",
         callback_data=f"subpoll:approve:{record['id']}",
     )
+    builder.button(
+        text="Bekor qilish ❌",
+        callback_data=f"subpoll:reject:{record['id']}",
+    )
     builder.adjust(1)
 
     tz = ZoneInfo(os.getenv("TZ", "Asia/Tashkent"))
@@ -399,6 +403,71 @@ async def on_manual_approve(callback: types.CallbackQuery):
         pass
 
     await callback.answer("Tasdiqlandi")
+
+
+@subscription_router.callback_query(F.data.startswith("subpoll:reject"))
+async def on_manual_reject(callback: types.CallbackQuery):
+    if not await _is_authorized_admin(callback):
+        await callback.answer("Ruxsat yo‘q", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    try:
+        request_id = int(parts[2]) if len(parts) > 2 else 0
+    except Exception:
+        request_id = 0
+    if not request_id:
+        await callback.answer("So‘rov ID noto‘g‘ri.", show_alert=True)
+        return
+
+    request = await get_manual_activation_request(request_id)
+    if not request:
+        await callback.answer("So‘rov topilmadi.", show_alert=True)
+        return
+    if (request.get("status") or "").lower() != "pending":
+        await callback.answer("So‘rov allaqachon ko‘rib chiqilgan.")
+        return
+
+    user_id = request.get("user_id")
+    if not user_id:
+        await callback.answer("Foydalanuvchi aniqlanmadi.", show_alert=True)
+        return
+
+    rejected_at = datetime.now(timezone.utc)
+    updated_request = await update_manual_request_status(
+        request_id,
+        "rejected",
+        approved_by=callback.from_user.id,
+        approved_at_iso=rejected_at.isoformat(),
+    )
+
+    try:
+        await callback.bot.send_message(
+            user_id,
+            "Obuna so‘rovi bekor qilindi. Agar xatolik bo‘lsa, administrator bilan bog‘laning.",
+        )
+    except Exception as exc:
+        logger.warning(
+            "manual-reject-notify-failed",
+            extra={"error": str(exc), "user_id": user_id},
+        )
+
+    admin_username = (
+        f" @{callback.from_user.username}" if callback.from_user.username else ""
+    )
+    admin_summary = (
+        "❌ Obuna so‘rovi bekor qilindi\n"
+        f"So‘rov ID: {request_id}\n"
+        f"Foydalanuvchi ID: {user_id}\n"
+        f"Tasdiqlamadi: {callback.from_user.full_name}{admin_username} (ID: {callback.from_user.id})"
+    )
+
+    try:
+        await callback.message.edit_text(admin_summary)
+    except Exception:
+        pass
+
+    await callback.answer("Bekor qilindi")
 
 # [SUBSCRIPTION-POLLING-END]
 @subscription_router.message(Command("bratula"))
