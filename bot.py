@@ -782,6 +782,14 @@ def t_uz(k,**kw):
         "rep_range_invalid":"Sana formati noto‘g‘ri. Masalan: 2024-05-01",
         "rep_line":"{date} — {kind} — {cat} — {amount} {cur}",
         "rep_empty":"Bu bo‘lim uchun yozuv yo‘q.",
+        "btn_limit":"💡 Limit belgilash",
+        "btn_reset_totals":"♻️ Hisobni 0 qilish",
+        "limit_prompt":"Yangi harajat limitini so‘mda yuboring. 0 kiritsangiz, limit o‘chiriladi.",
+        "limit_saved":"✅ Limit {amount} so‘m qilib saqlandi.",
+        "limit_disabled":"Limit o‘chirildi.",
+        "limit_invalid":"Iltimos, son kiriting. Masalan: 150000",
+        "limit_reached":"⚠️ Harajat limiti ({limit}) bajarildi. Jami xarajat: {spent}.",
+        "reset_done":"✅ Hisob va analiz nolga tushirildi.",
 
         "btn_cards":"💳 Kartalarim",
         "cards_header":"Kartalar ro‘yxati:",
@@ -953,6 +961,14 @@ def t_ru(k, **kw):
         "rep_range_invalid": "Неверный формат даты. Например: 2024-05-01",
         "rep_line": "{date} — {kind} — {cat} — {amount} {cur}",
         "rep_empty": "Пока нет записей для этого раздела.",
+        "btn_limit": "💡 Установить лимит",
+        "btn_reset_totals": "♻️ Обнулить учет",
+        "limit_prompt": "Отправьте новый лимит расходов в суммах. Укажите 0, чтобы отключить.",
+        "limit_saved": "✅ Лимит установлен: {amount} сум.",
+        "limit_disabled": "Лимит отключен.",
+        "limit_invalid": "Пожалуйста, отправьте число. Например: 150000",
+        "limit_reached": "⚠️ Лимит расходов ({limit}) достигнут. Всего расходов: {spent}.",
+        "reset_done": "✅ Учёт и анализ обнулены.",
 
         "btn_cards": "💳 Мои карты",
         "cards_header": "Список карт:",
@@ -1143,7 +1159,11 @@ def kb_cards_menu(lang: str = "uz") -> ReplyKeyboardMarkup:
 def kb_input_entry(lang: str = "uz") -> ReplyKeyboardMarkup:
     T = L(lang)
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=T("btn_back"))]],
+        keyboard=[
+            [KeyboardButton(text=T("btn_limit"))],
+            [KeyboardButton(text=T("btn_reset_totals"))],
+            [KeyboardButton(text=T("btn_back"))],
+        ],
         resize_keyboard=True,
         one_time_keyboard=False,
     )
@@ -1461,13 +1481,20 @@ def guess_kind(text:str)->str:
             return "expense"
     if "sotib oldim" in t or "сотиб олдим" in t or "kiyim oldim" in t: return "expense"
     expense_hints = [
-        "chiqim","xarajat","taksi","benzin","ovqat","kafe","restoran","market","kommunal","internet","telefon","ijara","arenda",
-        "kiyim","kiyim","dress","oyoq kiyim","botinka","sumka","shop","magazin","bozor","dorixona","dori","apteka"
+        "chiqim","xarajat","rashod","расход","трата","potrat","потратил","потратила","oplati","оплатил","оплатила",
+        "zaplat","заплатил","заплатила","trak","kup","купил","купила","покупк","rashod","расходы","платёж","латеж",
+        "taksi","taxi","uber","bolt","yandex taxi","yandextaxi","benzin","ovqat","еда","пища","корм",
+        "kafe","restoran","ресторан","фастфуд","market","supermarket","магазин","маркет",
+        "kommunal","komunal","коммунал","internet","интернет","telefon","телефон","ijara","аренда","arenda",
+        "kiyim","одежда","dress","oyoq kiyim","обувь","botinka","sumka","sumку","shop","magazin","bozor",
+        "dorixona","apteka","lek","лекар","dori","medicine","аптека"
     ]
     if any(w in t for w in expense_hints):
         return "expense"
     income_hints = [
-        "kirim","кирим","oylik","maosh","маош","keldi","tushdi","келди","тушди","stipendiya","premiya","bonus","dividend"
+        "kirim","кирим","oylik","maosh","маош","keldi","tushdi","келди","тушди","stipendiya","premiya","bonus","dividend",
+        "доход","дохо","dohod","daxod","pribil","pribyl","прибыль","zarplata","зарплата","зарплату","зарплаты",
+        "получил","получила","пришло","пришли","зачислили","выдали","поступил"
     ]
     if any(w in t for w in income_hints):
         return "income"
@@ -1614,6 +1641,82 @@ def to_uzs(amount:int, currency:str)->int:
         return int(round(amount * rate))
     return int(amount)
 
+
+def _get_limit_profile(uid: int) -> tuple[int, Optional[datetime], bool]:
+    profile = USERS_PROFILE_CACHE.get(uid)
+    limit_raw = 0
+    start_raw = None
+    notified = False
+    if isinstance(profile, dict):
+        try:
+            limit_raw = int(float(profile.get("expense_limit") or 0))
+        except Exception:
+            limit_raw = 0
+        start_raw = profile.get("expense_limit_start")
+        try:
+            notified = bool(int(profile.get("expense_limit_notified") or 0))
+        except Exception:
+            notified = bool(profile.get("expense_limit_notified"))
+
+    start_dt: Optional[datetime] = None
+    if start_raw:
+        try:
+            parsed = datetime.fromisoformat(str(start_raw))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=TASHKENT)
+            start_dt = parsed
+        except Exception:
+            start_dt = None
+    return limit_raw, start_dt, notified
+
+
+def _set_limit_profile(uid: int, limit: int, start_iso: str, notified: int) -> None:
+    update_user_profile(
+        uid,
+        expense_limit=limit,
+        expense_limit_start=start_iso,
+        expense_limit_notified=notified,
+    )
+
+
+def _reset_user_totals(uid: int) -> None:
+    MEM_TX.pop(uid, None)
+    MEM_TX_SEQ.pop(uid, None)
+    ANALYSIS_COUNTERS.pop(uid, None)
+    profile = USERS_PROFILE_CACHE.get(uid)
+    if isinstance(profile, dict) and int(float(profile.get("expense_limit") or 0)) > 0:
+        _set_limit_profile(uid, int(float(profile.get("expense_limit") or 0)), now_tk().isoformat(), 0)
+
+
+async def maybe_notify_limit(uid: int, lang: str) -> None:
+    limit, start_dt, notified = _get_limit_profile(uid)
+    if limit <= 0:
+        return
+
+    if start_dt is None:
+        start_dt = now_tk()
+        _set_limit_profile(uid, limit, start_dt.isoformat(), 0)
+        notified = False
+
+    expenses = 0
+    for tx in MEM_TX.get(uid, []):
+        if tx.get("kind") != "expense":
+            continue
+        ts = tx.get("ts")
+        if isinstance(ts, datetime) and start_dt and ts < start_dt:
+            continue
+        currency = tx.get("currency", "UZS")
+        expenses += to_uzs(tx.get("amount") or 0, currency)
+
+    if expenses >= limit and not notified:
+        T = L(lang)
+        message = T("limit_reached", limit=fmt_amount(limit), spent=fmt_amount(expenses))
+        try:
+            await bot.send_message(uid, message)
+        except Exception:
+            pass
+        _set_limit_profile(uid, limit, (start_dt or now_tk()).isoformat(), 1)
+
 # ====== HANDLERS ======
 @rt.message(CommandStart())
 async def start(m:Message):
@@ -1717,12 +1820,48 @@ async def on_text(m:Message):
             # Waiting for manual activation digits; let subscription router handle input
             return
 
+        if t == T("btn_limit"):
+            STEP[uid] = "set_limit"
+            await m.answer(T("limit_prompt"), reply_markup=kb_card_cancel(lang))
+            return
+
+        if t == T("btn_reset_totals"):
+            _reset_user_totals(uid)
+            await m.answer(T("reset_done"), reply_markup=kb_input_entry(lang))
+            STEP[uid] = "input_tx"
+            return
+
         if t == T("btn_back"):
             await handle_back_button(m, uid, lang)
             return
 
         if step is None and not USER_ACTIVATED.get(uid):
             USER_ACTIVATED.setdefault(uid, False)
+
+        if step == "set_limit":
+            if t == T("btn_back"):
+                STEP[uid] = "input_tx"
+                await m.answer(T("enter_tx"), reply_markup=kb_input_entry(lang))
+                return
+            amount_val = parse_amount(t)
+            if amount_val is None:
+                digits = re.sub(r"\D", "", t or "")
+                try:
+                    amount_val = int(digits) if digits else None
+                except Exception:
+                    amount_val = None
+            if amount_val is None:
+                await m.answer(T("limit_invalid"), reply_markup=kb_card_cancel(lang))
+                return
+            if amount_val <= 0:
+                _set_limit_profile(uid, 0, "", 0)
+                await m.answer(T("limit_disabled"), reply_markup=kb_input_entry(lang))
+            else:
+                now_iso = now_tk().isoformat()
+                _set_limit_profile(uid, int(amount_val), now_iso, 0)
+                await m.answer(T("limit_saved", amount=fmt_amount(int(amount_val))), reply_markup=kb_input_entry(lang))
+            STEP[uid] = "input_tx"
+            return
 
         if step=="report_range_start":
             parsed=parse_report_range_date(t)
@@ -1811,6 +1950,7 @@ async def on_text(m:Message):
                 await m.answer(T("debt_saved_mine", who=tmp["who"], cur=tmp["currency"], amount=fmt_amount(tmp["amount"]), due=due))
             else:
                 await m.answer(T("debt_saved_given", who=tmp["who"], cur=tmp["currency"], amount=fmt_amount(tmp["amount"]), due=due))
+                await maybe_notify_limit(uid, lang)
             PENDING_DEBT.pop(uid, None); STEP[uid]="main"; return
 
         # menyular
@@ -2022,6 +2162,7 @@ async def on_text(m:Message):
                         T("debt_saved_given", who=who_val, cur=curr_val, amount=fmt_amount(amount_val), due=due_val),
                         reply_markup=kb_debt_done(debt_direction, debt_id, lang),
                     )
+                    await maybe_notify_limit(uid, lang)
                 return True
 
             PENDING_DEBT[uid] = {
@@ -2079,6 +2220,7 @@ async def on_text(m:Message):
                     ),
                     reply_markup=kb_tx_cancel(tx_saved["id"], lang),
                 )
+                await maybe_notify_limit(uid, lang)
 
             return True
 
@@ -2729,12 +2871,18 @@ async def send_balance(uid:int, m:Message):
 # ====== CATEGORY ======
 def guess_category(text:str)->str:
     t=(text or "").lower()
-    if any(w in t for w in ["taksi","yo‘l","yol","benzin","transport","metro","avtobus","такси","метро","автобус","транспорт"]): return "🚌 Transport"
-    if any(w in t for w in ["ovqat","kafe","restoran","non","taom","fastfood","osh","shashlik","еда","кафе","ресторан","фастфуд"]): return "🍔 Oziq-ovqat"
-    if any(w in t for w in ["kommunal","svet","gaz","suv","коммунал","свет","газ","вода"]): return "💡 Kommunal"
-    if any(w in t for w in ["internet","telefon","uzmobile","beeline","ucell","uztelecom","интернет","телефон"]): return "📱 Aloqa"
+    if any(w in t for w in [
+        "taksi","taxi","uber","bolt","yandex taxi","yo‘l","yol","benzin","transport",
+        "metro","avtobus","tramvay","машина","такси","метро","автобус","транспорт"
+    ]): return "🚌 Transport"
+    if any(w in t for w in [
+        "ovqat","kafe","restoran","non","taom","fastfood","osh","shashlik","coffee","lunch",
+        "еда","кафе","ресторан","фастфуд","пицца","бургер"
+    ]): return "🍔 Oziq-ovqat"
+    if any(w in t for w in ["kommunal","komunal","svet","gaz","suv","электр","коммунал","свет","газ","вода"]): return "💡 Kommunal"
+    if any(w in t for w in ["internet","wifi","telefon","uzmobile","beeline","ucell","uztelecom","интернет","телефон","мобил"]): return "📱 Aloqa"
     if any(w in t for w in ["ijara","kvartira","arenda","ipoteka","аренда","ипотека","квартира"]): return "🏠 Uy-ijara"
-    if any(w in t for w in ["dorixona","shifokor","apteka","dori","аптека","врач","лекар"]): return "💊 Sog‘liq"
+    if any(w in t for w in ["dorixona","shifokor","apteka","dori","аптека","врач","лекар","medicine","hospital"]): return "💊 Sog‘liq"
     if any(w in t for w in ["soliq","jarima","patent","налог","штраф","патент"]): return "💸 Soliq/Jarima"
     if any(w in t for w in ["kiyim","do‘kon","do'kon","bozor","market","savdo","shopping","supermarket","одежда","магазин","рынок","маркет"]): return "🛍 Savdo"
     if any(w in t for w in ["oylik","maosh","bonus","premiya","зарплата","премия","бонус"]): return "💪 Mehnat daromadlari"
