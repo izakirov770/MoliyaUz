@@ -8,6 +8,8 @@ from zoneinfo import ZoneInfo
 from urllib.parse import quote_plus, urlencode, urlparse, urlunparse, parse_qsl
 from typing import Optional, Dict, List, Tuple, Any
 
+import httpx
+
 from aiogram import Bot, Dispatcher, F, Router, BaseMiddleware
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.fsm.context import FSMContext
@@ -94,6 +96,15 @@ BOT_SHORT_DESCRIPTION_TEXT_RU = (
 BOT_SHORT_DESCRIPTION_TEXT_UZ = (
     os.getenv("BOT_SHORT_DESCRIPTION_UZ") or BOT_SHORT_DESCRIPTION_TEXT
 ).strip()
+
+ENABLE_AUTO_USD_RATE = os.getenv("ENABLE_AUTO_USD_RATE", "false").lower() in {"1", "true", "yes"}
+USD_RATE_PROVIDER_URL = os.getenv(
+    "USD_RATE_PROVIDER_URL",
+    "https://cbu.uz/uz/arkhiv-kursov-valyut/json/USD/",
+)
+USD_RATE_UPDATE_INTERVAL = int(os.getenv("USD_RATE_UPDATE_INTERVAL", "43200"))
+CURRENT_USD_RATE = USD_UZS
+LAST_USD_RATE_UPDATE: Optional[datetime] = None
 
 # ====== PACKAGE BRIDGE ======
 _BOT_MODULE_PATH = Path(__file__).resolve().parent / "bot"
@@ -503,6 +514,64 @@ async def ensure_bot_description() -> None:
         logging.getLogger(__name__).warning("set-bot-description-failed: %s", exc)
     BOT_DESCRIPTION_APPLIED = True
 
+
+async def _fetch_usd_rate_from_provider() -> Optional[float]:
+    if not USD_RATE_PROVIDER_URL:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(USD_RATE_PROVIDER_URL)
+            response.raise_for_status()
+            payload = response.json()
+    except Exception as exc:  # pragma: no cover
+        logger.warning("usd-rate-fetch-failed", extra={"error": str(exc)})
+        return None
+
+    def _extract_rate(data: Any) -> Optional[float]:
+        if isinstance(data, dict):
+            for key in ("Rate", "rate", "CBU_RATE", "cbu_rate", "Value", "value"):
+                if key in data:
+                    raw = str(data[key]).strip()
+                    if not raw:
+                        continue
+                    raw = raw.replace(" ", "").replace(",", ".")
+                    try:
+                        return float(raw)
+                    except Exception:
+                        continue
+            for value in data.values():
+                rate = _extract_rate(value)
+                if rate is not None:
+                    return rate
+        elif isinstance(data, list):
+            for item in reversed(data):
+                rate = _extract_rate(item)
+                if rate is not None:
+                    return rate
+        return None
+
+    return _extract_rate(payload)
+
+
+async def refresh_usd_rate() -> None:
+    global CURRENT_USD_RATE, LAST_USD_RATE_UPDATE
+    rate = await _fetch_usd_rate_from_provider()
+    if rate:
+        CURRENT_USD_RATE = rate
+        LAST_USD_RATE_UPDATE = datetime.now(timezone.utc)
+        logger.info("usd-rate-updated", extra={"rate": rate})
+
+
+async def usd_rate_updater() -> None:
+    if USD_RATE_UPDATE_INTERVAL <= 0:
+        return
+    while True:
+        try:
+            await refresh_usd_rate()
+        except Exception as exc:  # pragma: no cover
+            logger.warning("usd-rate-updater-error", extra={"error": str(exc)})
+        await asyncio.sleep(max(USD_RATE_UPDATE_INTERVAL, 1800))
+
 TRIAL_MIN = 15
 TRIAL_START: Dict[int,datetime] = {}
 SUB_EXPIRES: Dict[int,datetime] = {}
@@ -812,6 +881,8 @@ def t_uz(k,**kw):
         "sub_not_found_or_pending":"To‘lov topilmadi yoki hali tasdiqlanmagan.",
         "sub_pending_wait":"To‘lov hali tasdiqlanmagan. Iltimos, keyinroq qayta tekshiring.",
         "sub_create_first":"Avval to‘lov yarating.",
+        "sub_already_active":"Obunangiz allaqachon faol. Amal qiladi: {end} gacha.",
+        "sub_already_active_no_end":"Obunangiz allaqachon faol.",
         "error_generic":"Xatolik yuz berdi.",
 
         "morning_ping":"🌅 Hayrli tong! Harajatlaringizni yozishni unutmang — MoliyaUz doim yoningizda.",
@@ -980,8 +1051,10 @@ def t_ru(k, **kw):
         "sub_expired": "Срок подписки истек.",
         "sub_not_found_or_pending": "Платеж не найден или не подтвержден.",
         "sub_pending_wait": "Платеж ещё не подтвержден. Попробуйте позже.",
-        "error_generic": "Произошла ошибка.",
         "sub_create_first": "Сначала создайте платеж.",
+        "sub_already_active": "Подписка уже активна. Действительна до {end}.",
+        "sub_already_active_no_end": "Подписка уже активна.",
+        "error_generic": "Произошла ошибка.",
 
         "morning_ping": "🌅 Доброе утро! Не забудьте записать расходы — MoliyaUz рядом.",
         "evening_ping": "🌙 Как прошёл день? Не забудьте внести траты. Всего 15 секунд!",
@@ -1537,7 +1610,8 @@ def month_period():
 
 def to_uzs(amount:int, currency:str)->int:
     if currency == "USD":
-        return int(round(amount * USD_UZS))
+        rate = CURRENT_USD_RATE or USD_UZS
+        return int(round(amount * rate))
     return int(amount)
 
 # ====== HANDLERS ======
@@ -1876,7 +1950,27 @@ async def on_text(m:Message):
         if t==T("sub_manual_btn"):
             record = await payments_get_latest_payment(uid)
             status = (record.get("status") or "").lower() if record else ""
-            if not record or status != "pending":
+            if not record:
+                await send_subscription_invoice_message(uid, lang, "month", m)
+                return
+
+            if status == "paid":
+                await ensure_subscription_state(uid)
+                expires_at = SUB_EXPIRES.get(uid)
+                if expires_at:
+                    end_str = expires_at.strftime("%d.%m.%Y")
+                    await m.answer(
+                        T("sub_already_active", end=end_str),
+                        reply_markup=get_main_menu(lang),
+                    )
+                else:
+                    await m.answer(
+                        T("sub_already_active_no_end"),
+                        reply_markup=get_main_menu(lang),
+                    )
+                return
+
+            if status != "pending":
                 await send_subscription_invoice_message(uid, lang, "month", m)
                 return
 
@@ -2808,6 +2902,8 @@ async def main():
     dp.include_router(subscription_router)
     dp.include_router(rt)
     await ensure_bot_description()
+    if ENABLE_AUTO_USD_RATE:
+        await refresh_usd_rate()
     try:
         await set_cmds()
     except Exception as exc:
@@ -2817,6 +2913,8 @@ async def main():
     sample_url = build_miniapp_url(WEB_BASE, MONTH_PLAN_PRICE, sample_invoice, sample_return)
     print("MINI_APP_URL_FOR_BOTFATHER:", MINI_APP_BASE_URL)
     print("TEST_URL_SAMPLE:", sample_url)
+    if ENABLE_AUTO_USD_RATE:
+        asyncio.create_task(usd_rate_updater())
     asyncio.create_task(subscription_reminder_loop())
     asyncio.create_task(daily_reminder())
     asyncio.create_task(debt_reminder())
