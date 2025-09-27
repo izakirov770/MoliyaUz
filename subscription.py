@@ -376,7 +376,6 @@ async def on_manual_approve(callback: types.CallbackQuery):
         await callback.bot.send_message(
             user_id,
             "Obunangiz tasdiqlandi ✅\n"
-            f"Tarif: {plan_label}\n"
             f"Amal qiladi: {expires_str} gacha",
         )
     except Exception as exc:
