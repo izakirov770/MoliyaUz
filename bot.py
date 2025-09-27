@@ -586,6 +586,7 @@ MEM_TX_SEQ: Dict[int, int] = {}
 MEM_DEBTS: Dict[int, List[dict]] = {}
 MEM_DEBTS_SEQ: Dict[int,int] = {}
 PENDING_DEBT: Dict[int,dict] = {}
+DEBT_EDIT_STATE: Dict[int, dict] = {}
 
 # payment pending
 # pid -> {"uid","plan","period_days","amount","currency","status","created"}
@@ -854,11 +855,30 @@ def t_uz(k,**kw):
         "debt_need":"Qarz matnini tushunmadim. Ism va summani yozing.",
         "date_need":"Sanani tushunmadim. Masalan: 25.09.2025 yoki ertaga.",
         "debt_cancelled":"❌ Qarz yozuvi bekor qilindi.",
-        "card_debt":"— — —\n<b>QARZ</b>\nSana: {created}\nKim: {who}\nKategoriya: 💳 Qarzlar\nSumma: {cur} {amount}\nYo'nalish: {direction}\nBerilgan sana: {created}\nQaytadigan sana: {due}\nHolati: {status}",
+        "card_debt":"— — —\n<b>QARZ</b>\nSana: {created}\nKim: {who}\nYo‘nalish: {direction}\nUmumiy: {cur} {amount}\nTo‘langan: {cur} {paid}\nQoldiq: {cur} {remain}\nMuddat: {due}\nHolat: {status}",
         "debt_dir_mine":"Qarz olindi",
         "debt_dir_given":"Qarz berildi",
         "st_wait":"⏳ Kutilmoqda","st_paid":"✅ Tulangan","st_rcv":"✅ Qaytarilgan",
         "btn_paid":"✅ Tuladim","btn_rcv":"✅ Berildi",
+        "btn_debt_edit":"✏️ Tahrirlash",
+        "btn_cancel":"❌ Bekor qilish",
+        "debt_edit_prompt":(
+            "Jami: {cur} {amount}\\n"
+            "To‘langan: {cur} {paid}\\n"
+            "Qoldiq: {cur} {remain}\\n"
+            "Tulagan summani yuboring. Qo‘shimcha qarz qo‘shish uchun +belgili qiymat yuboring "
+            "(masalan: 200000 yoki +50000)."
+        ),
+        "debt_edit_invalid":"Son kiriting. Masalan: 200000 yoki +50000",
+        "debt_edit_saved":"✅ {cur} {applied} qoplandi. Qoldiq: {cur} {remain}",
+        "debt_edit_completed":"✅ Qarz to‘liq yopildi.",
+        "debt_edit_added":"➕ Qarz {cur} {added} ga oshdi. Yangi qoldiq: {cur} {remain}",
+        "debt_edit_no_remain":"Bu qarz allaqachon yopilgan.",
+        "debt_edit_not_found":"Qarz topilmadi yoki allaqachon yopilgan.",
+        "debt_tx_partial_paid":"💳 Qarz qisman to‘landi",
+        "debt_tx_partial_received":"💳 Qarz qisman qaytdi",
+        "debt_tx_extra_given":"💳 Qo‘shimcha qarz berildi",
+        "debt_tx_extra_taken":"💳 Qo‘shimcha qarz olindi",
 
         "sub_choose":(
             "⭐️ 1 oylik obunani tanlang va CLICK orqali to‘lovni amalga oshiring.\n\n"
@@ -963,7 +983,7 @@ def t_ru(k, **kw):
         "rep_empty": "Пока нет записей для этого раздела.",
         "btn_limit": "💡 Установить лимит",
         "btn_reset_totals": "♻️ Обнулить учет",
-        "limit_prompt": "Отправьте новый лимит расходов в суммах. Укажите 0, чтобы отключить.",
+        "limit_prompt": "Отправьте новый лимит расходов (в суммах). Укажите 0, чтобы отключить.",
         "limit_saved": "✅ Лимит установлен: {amount} сум.",
         "limit_disabled": "Лимит отключен.",
         "limit_invalid": "Пожалуйста, отправьте число. Например: 150000",
@@ -1033,11 +1053,30 @@ def t_ru(k, **kw):
         "debt_need": "Не понял долг. Укажите имя и сумму.",
         "date_need": "Не понял дату. Например: 25.09.2025 или завтра.",
         "debt_cancelled": "❌ Запись о долге удалена.",
-        "card_debt": "— — —\n<b>ДОЛГ</b>\nСоздано: {created}\nКто/Кому: {who}\nКатегория: 💳 Долги\nСумма: {cur} {amount}\nНаправление: {direction}\nДата выдачи: {created}\nДата возврата: {due}\nСтатус: {status}",
+        "card_debt": "— — —\n<b>ДОЛГ</b>\nСоздано: {created}\nКто/Кому: {who}\nНаправление: {direction}\nСумма: {cur} {amount}\nОплачено: {cur} {paid}\nОстаток: {cur} {remain}\nДата возврата: {due}\nСтатус: {status}",
         "debt_dir_mine": "Долг взяли",
         "debt_dir_given": "Долг выдали",
         "st_wait": "⏳ Ожидается", "st_paid": "✅ Оплачен", "st_rcv": "✅ Возвращен",
         "btn_paid": "✅ Оплатил", "btn_rcv": "✅ Вернул",
+        "btn_debt_edit": "✏️ Изменить",
+        "btn_cancel": "❌ Отменить",
+        "debt_edit_prompt": (
+            "Сумма: {cur} {amount}\\n"
+            "Оплачено: {cur} {paid}\\n"
+            "Остаток: {cur} {remain}\\n"
+            "Отправьте сумму платежа. Чтобы увеличить долг, отправьте значение с плюсом "
+            "(например: 200000 или +50000)."
+        ),
+        "debt_edit_invalid": "Пожалуйста, введите число. Например: 200000 или +50000",
+        "debt_edit_saved": "✅ Зачтено {cur} {applied}. Остаток: {cur} {remain}",
+        "debt_edit_completed": "✅ Долг полностью погашен.",
+        "debt_edit_added": "➕ Долг увеличен на {cur} {added}. Новый остаток: {cur} {remain}",
+        "debt_edit_no_remain": "Этот долг уже закрыт.",
+        "debt_edit_not_found": "Долг не найден или уже закрыт.",
+        "debt_tx_partial_paid": "💳 Частичный платёж по долгу",
+        "debt_tx_partial_received": "💳 Частичный возврат долга",
+        "debt_tx_extra_given": "💳 Дополнительно одолжено",
+        "debt_tx_extra_taken": "💳 Дополнительно занял",
 
         "sub_choose":(
             "⭐️ Выберите месячную подписку и оплатите её через CLICK.\n\n"
@@ -1088,7 +1127,17 @@ def t_ru(k, **kw):
     }
     return R.get(k, t_uz(k, **kw)).format(**kw)
 
-def get_lang(uid:int)->str: return USER_LANG.get(uid,"uz")
+def get_lang(uid: int) -> str:
+    lang = USER_LANG.get(uid)
+    if lang:
+        return lang
+    profile = USERS_PROFILE_CACHE.get(uid)
+    if isinstance(profile, dict):
+        lang_val = profile.get("lang")
+        if lang_val:
+            USER_LANG[uid] = lang_val
+            return lang_val
+    return "uz"
 def L(lang: str):
     return t_uz if lang=="uz" else t_ru
 
@@ -1301,18 +1350,25 @@ def kb_debt_menu(lang="uz"):
         [InlineKeyboardButton(text=T("debt_archive_btn"),callback_data="debt:archive")]
     ])
 
-def kb_debt_done(direction,debt_id, lang="uz"):
-    T=L(lang)
-    lab=T("btn_paid") if direction=="mine" else T("btn_rcv")
-    cancel_text = "❌ Bekor qilish" if lang == "uz" else "❌ Отменить"
+def kb_debt_actions(direction: str, debt_id: int, lang: str = "uz") -> InlineKeyboardMarkup:
+    T = L(lang)
+    pay_label = T("btn_paid") if direction == "mine" else T("btn_rcv")
+    edit_label = T("btn_debt_edit")
+    cancel_label = T("btn_cancel")
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text=lab, callback_data=f"debtdone:{direction}:{debt_id}"),
-                InlineKeyboardButton(text=cancel_text, callback_data=f"debtcancel:{debt_id}"),
+                InlineKeyboardButton(text=pay_label, callback_data=f"debtdone:{direction}:{debt_id}"),
+                InlineKeyboardButton(text=edit_label, callback_data=f"debtedit:{debt_id}"),
+                InlineKeyboardButton(text=cancel_label, callback_data=f"debtcancel:{debt_id}"),
             ]
         ]
     )
+
+
+def kb_debt_done(direction: str, debt_id: int, lang: str = "uz") -> InlineKeyboardMarkup:
+    return kb_debt_actions(direction, debt_id, lang)
+
 
 def kb_sub(lang="uz"):
     T=L(lang)
@@ -1384,6 +1440,7 @@ async def show_navigation_state(uid: int, lang: str, state: str, message: Messag
 async def handle_back_button(m: Message, uid: int, lang: str) -> None:
     PENDING_DEBT.pop(uid, None)
     REPORT_RANGE_STATE.pop(uid, None)
+    DEBT_EDIT_STATE.pop(uid, None)
     STEP[uid] = "main"
     state = nav_back(uid)
     await show_navigation_state(uid, lang, state, m)
@@ -1466,8 +1523,10 @@ def detect_currency(text:str)->str:
 
 def detect_account(text:str)->str:
     t=(text or "").lower()
-    if any(w in t for w in ["karta","plastik","card","visa","master","uzcard","humo","bank"]): return "card"
-    if any(w in t for w in ["naqd","cash","qo'lda","qolda","qo‘l","qol"]): return "cash"
+    if any(w in t for w in ["karta","plastik","card","visa","master","uzcard","humo","bank","карта","карты","с карты","банковская"]):
+        return "card"
+    if any(w in t for w in ["naqd","cash","qo'lda","qolda","qo‘l","qol","налич","налом","наличные"]):
+        return "cash"
     return "cash"
 
 def guess_kind(text:str)->str:
@@ -1481,20 +1540,23 @@ def guess_kind(text:str)->str:
             return "expense"
     if "sotib oldim" in t or "сотиб олдим" in t or "kiyim oldim" in t: return "expense"
     expense_hints = [
-        "chiqim","xarajat","rashod","расход","трата","potrat","потратил","потратила","oplati","оплатил","оплатила",
-        "zaplat","заплатил","заплатила","trak","kup","купил","купила","покупк","rashod","расходы","платёж","латеж",
-        "taksi","taxi","uber","bolt","yandex taxi","yandextaxi","benzin","ovqat","еда","пища","корм",
-        "kafe","restoran","ресторан","фастфуд","market","supermarket","магазин","маркет",
-        "kommunal","komunal","коммунал","internet","интернет","telefon","телефон","ijara","аренда","arenda",
-        "kiyim","одежда","dress","oyoq kiyim","обувь","botinka","sumka","sumку","shop","magazin","bozor",
-        "dorixona","apteka","lek","лекар","dori","medicine","аптека"
+        "chiqim","xarajat","rashod","расход","расходы","трата","траты","potrat","потратил","потратила","потратим",
+        "oplati","оплатил","оплатила","оплата","оплатить","zaplat","заплатил","заплатила","заплатить",
+        "kup","купил","купила","покупк","купить","приобрёл","приобрела","списан","списали","снял","сняла",
+        "taksi","taxi","uber","bolt","yandex taxi","yandextaxi","cab","benzin","ovqat","продукт","еда","пища","корм",
+        "kafe","restoran","ресторан","фастфуд","кафе","кофе","coffee","market","supermarket","магазин","маркет","супермаркет",
+        "kommunal","komunal","коммунал","svet","электр","газ","свет","вода","internet","интернет","wifi",
+        "telefon","телефон","связь","ijara","аренда","arenda","ipoteka","ипотека",
+        "kiyim","одежда","dress","oyoq kiyim","обувь","botinka","sumka","сумка","shop","magazin","bozor","магаз",
+        "dorixona","apteka","lek","лекар","dori","medicine","аптека","врач","больница"
     ]
     if any(w in t for w in expense_hints):
         return "expense"
     income_hints = [
-        "kirim","кирим","oylik","maosh","маош","keldi","tushdi","келди","тушди","stipendiya","premiya","bonus","dividend",
-        "доход","дохо","dohod","daxod","pribil","pribyl","прибыль","zarplata","зарплата","зарплату","зарплаты",
-        "получил","получила","пришло","пришли","зачислили","выдали","поступил"
+        "kirim","кирим","oylik","maosh","маош","maosh","keldi","tushdi","келди","тушди","stipendiya","premiya","bonus","dividend",
+        "dohod","доход","доходы","дохода","дoход","daxod","pribil","pribyl","прибыль","zarplata","зарплата","зарплату","зарплаты",
+        "zarabotok","заработок","заработал","заработала","получил","получила","получили","пришло","пришла","пришли",
+        "зачислили","выдали","поступил","поступило","поступили","возврат","вернули","продал","продали","продажа"
     ]
     if any(w in t for w in income_hints):
         return "income"
@@ -1560,22 +1622,44 @@ async def save_tx(uid:int, kind:str, amount:int, currency:str, account:str, cate
     update_analysis_counters(uid, kind, amount, currency)
     return tx
 
-async def save_debt(uid:int, direction:str, amount:int, currency:str, counterparty:str, due:str)->int:
+async def save_debt(uid:int, direction:str, amount:int, currency:str, counterparty:str, due:str)->dict:
     await ensure_month_rollover()
     did=next_debt_id(uid)
-    MEM_DEBTS.setdefault(uid,[]).append({
-        "id":did, "ts":now_tk(), "direction":direction, "amount":amount,
-        "currency":currency, "counterparty":counterparty, "due":due, "status":"wait"
-    })
-    return did
+    debt = {
+        "id":did,
+        "ts":now_tk(),
+        "direction":direction,
+        "amount":amount,
+        "currency":currency,
+        "counterparty":counterparty,
+        "due":due,
+        "status":"wait",
+        "paid":0,
+    }
+    MEM_DEBTS.setdefault(uid,[]).append(debt)
+    return debt
 
 def debt_card(it:dict, lang="uz")->str:
     T=L(lang)
     s={"wait":T("st_wait"),"paid":T("st_paid"),"received":T("st_rcv")}[it.get("status","wait")]
     direction_key = "debt_dir_given" if it.get("direction") == "given" else "debt_dir_mine"
     dir_label = T(direction_key)
-    return T("card_debt", created=fmt_date(it["ts"]), who=it["counterparty"], cur=it.get("currency","UZS"),
-             amount=fmt_amount(it["amount"]), due=it["due"], status=s, direction=dir_label)
+    paid_amt = it.get("paid", 0) or 0
+    amount_total = it.get("amount", 0) or 0
+    remain = max(amount_total - paid_amt, 0)
+    currency = it.get("currency","UZS")
+    return T(
+        "card_debt",
+        created=fmt_date(it["ts"]),
+        who=it.get("counterparty") or "—",
+        cur=currency,
+        amount=fmt_amount(amount_total),
+        paid=fmt_amount(paid_amt),
+        remain=fmt_amount(remain),
+        due=it.get("due") or "—",
+        status=s,
+        direction=dir_label,
+    )
 
 # ====== REPORT HELPERS ======
 def report_range(kind:str):
@@ -1861,6 +1945,140 @@ async def on_text(m:Message):
                 _set_limit_profile(uid, int(amount_val), now_iso, 0)
                 await m.answer(T("limit_saved", amount=fmt_amount(int(amount_val))), reply_markup=kb_input_entry(lang))
             STEP[uid] = "input_tx"
+            return
+
+        if step == "debt_edit":
+            state = DEBT_EDIT_STATE.get(uid)
+            if not state:
+                STEP[uid] = "main"
+                await m.answer(T("debt_edit_not_found"), reply_markup=kb_debt_menu_reply(lang))
+                return
+
+            raw_value = t.strip()
+            if not raw_value:
+                await m.answer(T("debt_edit_invalid"), reply_markup=kb_card_cancel(lang))
+                return
+
+            mode = "pay"
+            if raw_value.startswith("+"):
+                mode = "increase"
+                raw_value = raw_value[1:].strip()
+            elif raw_value.startswith("-"):
+                raw_value = raw_value[1:].strip()
+
+            amount_val = parse_amount(raw_value)
+            if amount_val is None or amount_val <= 0:
+                await m.answer(T("debt_edit_invalid"), reply_markup=kb_card_cancel(lang))
+                return
+
+            debt_id = state.get("id")
+            debts = MEM_DEBTS.get(uid, [])
+            debt = next((item for item in debts if item.get("id") == debt_id), None)
+            if not debt:
+                DEBT_EDIT_STATE.pop(uid, None)
+                STEP[uid] = "main"
+                await m.answer(T("debt_edit_not_found"), reply_markup=kb_debt_menu_reply(lang))
+                return
+
+            currency = debt.get("currency", "UZS")
+            amount_total = int(debt.get("amount", 0) or 0)
+            paid_total = int(debt.get("paid", 0) or 0)
+            remain_after = max(amount_total - paid_total, 0)
+            reply_text = None
+            archived = False
+
+            if mode == "increase":
+                debt["amount"] = amount_total + amount_val
+                amount_total = int(debt.get("amount", 0) or 0)
+                remain_after = max(amount_total - paid_total, 0)
+                reply_text = T(
+                    "debt_edit_added",
+                    cur=currency,
+                    added=fmt_amount(amount_val),
+                    remain=fmt_amount(remain_after),
+                )
+                if amount_val > 0:
+                    direction = debt.get("direction")
+                    if direction == "given":
+                        await save_tx(uid, "expense", amount_val, currency, "cash", T("debt_tx_extra_given"), "")
+                        await maybe_notify_limit(uid, lang)
+                    else:
+                        await save_tx(uid, "income", amount_val, currency, "cash", T("debt_tx_extra_taken"), "")
+            else:
+                remain_before = max(amount_total - paid_total, 0)
+                if remain_before <= 0:
+                    DEBT_EDIT_STATE.pop(uid, None)
+                    STEP[uid] = "main"
+                    await m.answer(T("debt_edit_no_remain"), reply_markup=kb_debt_menu_reply(lang))
+                    return
+
+                applied = min(amount_val, remain_before)
+                debt["paid"] = paid_total + applied
+                paid_total = int(debt.get("paid", 0) or 0)
+                remain_after = max(amount_total - paid_total, 0)
+
+                if applied > 0:
+                    direction = debt.get("direction")
+                    if direction == "mine":
+                        await save_tx(uid, "expense", applied, currency, "cash", T("debt_tx_partial_paid"), "")
+                        await maybe_notify_limit(uid, lang)
+                    else:
+                        await save_tx(uid, "income", applied, currency, "cash", T("debt_tx_partial_received"), "")
+
+                if remain_after <= 0:
+                    debt["status"] = "paid" if debt.get("direction") == "mine" else "received"
+                    debt["paid"] = debt.get("amount", 0)
+                    archive_debt_record(uid, debt)
+                    MEM_DEBTS[uid] = [item for item in debts if item.get("id") != debt_id]
+                    archived = True
+                    reply_text = T("debt_edit_completed")
+                else:
+                    reply_text = T(
+                        "debt_edit_saved",
+                        cur=currency,
+                        applied=fmt_amount(applied),
+                        remain=fmt_amount(remain_after),
+                    )
+
+            state = DEBT_EDIT_STATE.pop(uid, None)
+            STEP[uid] = "main"
+
+            message_markup = None if archived else kb_debt_done(debt.get("direction"), debt_id, lang)
+            message_text = debt_card(debt, lang)
+
+            if archived:
+                note_date = fmt_date(now_tk())
+                archived_items = DEBTS_ARCHIVE.get(uid, [])
+                if archived_items:
+                    arch_last = next((item for item in reversed(archived_items) if item.get("id") == debt_id), archived_items[-1])
+                    arch_dt = arch_last.get("archived_at")
+                    if isinstance(arch_dt, datetime):
+                        note_date = fmt_date(arch_dt)
+                    elif isinstance(arch_dt, str):
+                        try:
+                            note_date = fmt_date(datetime.fromisoformat(arch_dt))
+                        except Exception:
+                            note_date = arch_dt
+                message_text = f"{message_text}\n{T('debt_archive_note', date=note_date)}"
+
+            if state:
+                chat_id = state.get("chat_id")
+                message_id = state.get("message_id")
+                if chat_id and message_id:
+                    try:
+                        await bot.edit_message_text(
+                            message_text,
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            reply_markup=message_markup,
+                        )
+                    except Exception:
+                        pass
+
+            if reply_text:
+                await m.answer(reply_text, reply_markup=kb_debt_menu_reply(lang))
+            else:
+                await m.answer(T("debt_edit_saved", cur=currency, applied=fmt_amount(0), remain=fmt_amount(remain_after)), reply_markup=kb_debt_menu_reply(lang))
             return
 
         if step=="report_range_start":
@@ -2207,7 +2425,7 @@ async def on_text(m:Message):
                     reply_markup=kb_tx_cancel(tx_saved["id"], lang),
                 )
             else:
-                cat_val = guess_category(entry)
+                cat_val = guess_category(entry, lang)
                 tx_saved = await save_tx(uid, "expense", amount_val, curr_val, acc_val, cat_val, entry)
                 await m.answer(
                     T(
@@ -2303,7 +2521,7 @@ async def on_text(m:Message):
             )
             return
         else:
-            cat=guess_category(t)
+            cat=guess_category(t, lang)
             tx_saved = await save_tx(uid,"expense",amount,curr,acc,cat,t)
             await m.answer(
                 T("tx_exp",date=fmt_date(now_tk()),cur=curr,amount=fmt_amount(amount),cat=cat,desc=t),
@@ -2525,6 +2743,61 @@ async def debt_cb(c:CallbackQuery):
     await c.answer()
 
 
+@rt.callback_query(F.data.startswith("debtedit:"))
+async def debt_edit_cb(c: CallbackQuery):
+    user = c.from_user
+    if not user:
+        await c.answer()
+        return
+
+    uid = user.id
+    lang = get_lang(uid)
+    T = L(lang)
+
+    try:
+        did = int(c.data.split(":", 1)[1])
+    except Exception:
+        await c.answer(T("debt_edit_not_found"), show_alert=True)
+        return
+
+    debts = MEM_DEBTS.get(uid, [])
+    debt = next((item for item in debts if item.get("id") == did), None)
+    if not debt:
+        await c.answer(T("debt_edit_not_found"), show_alert=True)
+        try:
+            await c.message.edit_reply_markup()
+        except Exception:
+            pass
+        return
+
+    amount_total = int(debt.get("amount", 0) or 0)
+    paid_total = int(debt.get("paid", 0) or 0)
+    remain = max(amount_total - paid_total, 0)
+    currency = debt.get("currency", "UZS")
+
+    DEBT_EDIT_STATE[uid] = {
+        "id": did,
+        "chat_id": c.message.chat.id if c.message else None,
+        "message_id": c.message.message_id if c.message else None,
+    }
+    STEP[uid] = "debt_edit"
+
+    prompt = T(
+        "debt_edit_prompt",
+        amount=fmt_amount(amount_total),
+        paid=fmt_amount(paid_total),
+        remain=fmt_amount(remain),
+        cur=currency,
+    )
+
+    if c.message:
+        await c.message.answer(prompt, reply_markup=kb_card_cancel(lang))
+    else:
+        await bot.send_message(uid, prompt, reply_markup=kb_card_cancel(lang))
+
+    await c.answer()
+
+
 @rt.callback_query(F.data.startswith("debtdone:"))
 async def debt_done(c:CallbackQuery):
     uid=c.from_user.id
@@ -2534,12 +2807,22 @@ async def debt_done(c:CallbackQuery):
     _,direction,sid=c.data.split(":"); did=int(sid)
     for it in MEM_DEBTS.get(uid,[]):
         if it["id"]==did:
+            amount_total = int(it.get("amount", 0) or 0)
+            paid_total = int(it.get("paid", 0) or 0)
+            currency = it.get("currency", "UZS")
+            remain = max(amount_total - paid_total, 0)
+
             if direction=="mine":
                 it["status"]="paid"       # o'z qarzingizni to'ladingiz -> CHIQIM
-                await save_tx(uid,"expense",it["amount"],it.get("currency","UZS"),"cash","💳 Qarz qaytarildi" if lang=="uz" else "💳 Долг оплачен","")
+                it["paid"] = amount_total
+                if remain > 0:
+                    await save_tx(uid,"expense",remain,currency,"cash","💳 Qarz qaytarildi" if lang=="uz" else "💳 Долг оплачен","")
+                    await maybe_notify_limit(uid, lang)
             else:
                 it["status"]="received"   # sizga qarz qaytdi -> KIRIM
-                await save_tx(uid,"income",it["amount"],it.get("currency","UZS"),"cash","💳 Qarz qaytdi" if lang=="uz" else "💳 Долг возвращен","")
+                it["paid"] = amount_total
+                if remain > 0:
+                    await save_tx(uid,"income",remain,currency,"cash","💳 Qarz qaytdi" if lang=="uz" else "💳 Долг возвращен","")
             archive_debt_record(uid, it)
             MEM_DEBTS[uid]=[d for d in MEM_DEBTS.get(uid,[]) if d.get("id")!=did]
             note_date = fmt_date(now_tk())
@@ -2869,24 +3152,66 @@ async def send_balance(uid:int, m:Message):
 
 
 # ====== CATEGORY ======
-def guess_category(text:str)->str:
-    t=(text or "").lower()
-    if any(w in t for w in [
-        "taksi","taxi","uber","bolt","yandex taxi","yo‘l","yol","benzin","transport",
-        "metro","avtobus","tramvay","машина","такси","метро","автобус","транспорт"
-    ]): return "🚌 Transport"
-    if any(w in t for w in [
-        "ovqat","kafe","restoran","non","taom","fastfood","osh","shashlik","coffee","lunch",
-        "еда","кафе","ресторан","фастфуд","пицца","бургер"
-    ]): return "🍔 Oziq-ovqat"
-    if any(w in t for w in ["kommunal","komunal","svet","gaz","suv","электр","коммунал","свет","газ","вода"]): return "💡 Kommunal"
-    if any(w in t for w in ["internet","wifi","telefon","uzmobile","beeline","ucell","uztelecom","интернет","телефон","мобил"]): return "📱 Aloqa"
-    if any(w in t for w in ["ijara","kvartira","arenda","ipoteka","аренда","ипотека","квартира"]): return "🏠 Uy-ijara"
-    if any(w in t for w in ["dorixona","shifokor","apteka","dori","аптека","врач","лекар","medicine","hospital"]): return "💊 Sog‘liq"
-    if any(w in t for w in ["soliq","jarima","patent","налог","штраф","патент"]): return "💸 Soliq/Jarima"
-    if any(w in t for w in ["kiyim","do‘kon","do'kon","bozor","market","savdo","shopping","supermarket","одежда","магазин","рынок","маркет"]): return "🛍 Savdo"
-    if any(w in t for w in ["oylik","maosh","bonus","premiya","зарплата","премия","бонус"]): return "💪 Mehnat daromadlari"
-    return "🧾 Boshqa xarajatlar" if "uz" in t or "so'm" in t else "🧾 Прочие расходы"
+CATEGORY_HINTS = {
+    "transport": [
+        "taksi","taxi","uber","bolt","yandex","yo‘l","yol","benzin","fuel","авто","машина","такси","метро","автобус",
+        "транспорт","tramvay","marshrut","parking","parkov"
+    ],
+    "food": [
+        "ovqat","kafe","restoran","non","taom","fastfood","osh","shashlik","coffee","lunch","breakfast","dinner",
+        "еда","кафе","ресторан","фастфуд","пицца","бургер","stolovaya","cafeteria"
+    ],
+    "utilities": [
+        "kommunal","komunal","svet","gaz","suv","электр","коммунал","свет","газ","вода","kvitan","квитан",
+        "electric","heating","тепл"
+    ],
+    "communication": [
+        "internet","интернет","wifi","telefon","телефон","связь","uzmobile","beeline","ucell","megafon","mob","sim"
+    ],
+    "housing": [
+        "ijara","kvartira","arenda","ipoteka","аренда","ипотека","квартира","дом","жильё","komnata"
+    ],
+    "health": [
+        "dorixona","shifokor","apteka","dori","аптека","врач","лекар","medicine","hospital","больница","klinika","clinic",
+        "dentist","стомат"
+    ],
+    "shopping": [
+        "magazin","market","supermarket","магазин","маркет","супермаркет","shop","store","bozor","рынок","kiyim","одежда",
+        "sumka","сумка","butik","аксессуар","techno","electronics","электроник"
+    ],
+    "entertainment": [
+        "kino","film","театр","concert","концерт","клуб","game","игра","Netflix","spotify","театр","park","аттракцион",
+        "музей","спортзал","fitness","spa","kinoteatr"
+    ],
+    "education": [
+        "kurs","dars","lesson","университет","школа","лект","training","education","edu","курс","семинар"
+    ],
+    "pets": ["it","dog","собака","mushuk","cat","кот","кошка","pet","живот","корм для"]
+}
+
+CATEGORY_LABELS = {
+    "transport": {"uz": "🚌 Transport", "ru": "🚌 Транспорт"},
+    "food": {"uz": "🍔 Oziq-ovqat", "ru": "🍔 Питание"},
+    "utilities": {"uz": "💡 Kommunal", "ru": "💡 Коммунальные"},
+    "communication": {"uz": "📱 Aloqa", "ru": "📱 Связь"},
+    "housing": {"uz": "🏠 Uy-ijara", "ru": "🏠 Жильё"},
+    "health": {"uz": "💊 Sog‘liq", "ru": "💊 Здоровье"},
+    "shopping": {"uz": "🛍 Savdo", "ru": "🛍 Покупки"},
+    "entertainment": {"uz": "🎉 Ko‘ngilochar", "ru": "🎉 Развлечения"},
+    "education": {"uz": "📚 Ta’lim", "ru": "📚 Обучение"},
+    "pets": {"uz": "🐾 Uy hayvoni", "ru": "🐾 Домашние питомцы"},
+    "other": {"uz": "🧾 Boshqa xarajatlar", "ru": "🧾 Прочие расходы"},
+}
+
+
+def guess_category(text: str, lang: str = "uz") -> str:
+    t = (text or "").lower()
+    for key, hints in CATEGORY_HINTS.items():
+        if any(h in t for h in hints):
+            labels = CATEGORY_LABELS.get(key, CATEGORY_LABELS["other"])
+            return labels.get(lang, labels.get("uz"))
+    labels = CATEGORY_LABELS["other"]
+    return labels.get(lang, labels.get("uz"))
 
 # ====== Eslatmalar ======
 def _sec_until(h:int,mn:int=0):
@@ -2939,14 +3264,33 @@ async def subscription_reminder_loop():
         await asyncio.sleep(3600)
 
 
+async def _reminder_users() -> list[dict[str, Any]]:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT user_id, COALESCE(lang, 'uz') AS lang FROM users WHERE reminder_on=1"
+            )
+            rows = await cur.fetchall()
+    except Exception as exc:
+        logger.warning("reminder-users-fetch-failed", extra={"error": str(exc)})
+        return []
+    return [dict(row) for row in rows]
+
+
 async def daily_reminder():
     schedule = ((8, "morning_ping"), (20, "evening_ping"))
     while True:
         for hour, key in schedule:
             try:
                 await asyncio.sleep(_sec_until(hour, 0))
-                for uid in list(SEEN_USERS):
-                    lang = get_lang(uid)
+                users = await _reminder_users()
+                for item in users:
+                    uid = item.get("user_id")
+                    if not uid:
+                        continue
+                    lang = item.get("lang") or get_lang(uid)
+                    USER_LANG[uid] = lang
                     T = L(lang)
                     text = T(key)
                     try:
