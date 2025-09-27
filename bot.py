@@ -2734,7 +2734,11 @@ async def debt_cb(c:CallbackQuery):
     uid=c.from_user.id
     lang=get_lang(uid); T=L(lang)
     await ensure_month_rollover()
-    if not has_access(uid): await c.message.answer(block_text(uid), reply_markup=kb_sub(lang)); await c.answer(); return
+    await ensure_subscription_state(uid)
+    if not has_access(uid):
+        await c.message.answer(block_text(uid), reply_markup=kb_sub(lang))
+        await c.answer()
+        return
     d=c.data.split(":")[1]
     if d=="archive":
         return
@@ -2753,6 +2757,13 @@ async def debt_edit_cb(c: CallbackQuery):
     uid = user.id
     lang = get_lang(uid)
     T = L(lang)
+    await ensure_month_rollover()
+    await ensure_subscription_state(uid)
+    if not has_access(uid):
+        if c.message:
+            await c.message.answer(block_text(uid), reply_markup=kb_sub(lang))
+        await c.answer()
+        return
 
     try:
         did = int(c.data.split(":", 1)[1])
@@ -2803,6 +2814,12 @@ async def debt_done(c:CallbackQuery):
     uid=c.from_user.id
     lang=get_lang(uid)
     await ensure_month_rollover()
+    await ensure_subscription_state(uid)
+    if not has_access(uid):
+        if c.message:
+            await c.message.answer(block_text(uid), reply_markup=kb_sub(lang))
+        await c.answer()
+        return
     T=L(lang)
     _,direction,sid=c.data.split(":"); did=int(sid)
     for it in MEM_DEBTS.get(uid,[]):
@@ -2848,6 +2865,13 @@ async def debt_cancel_cb(c: CallbackQuery):
     uid = c.from_user.id
     lang = get_lang(uid)
     T = L(lang)
+    await ensure_month_rollover()
+    await ensure_subscription_state(uid)
+    if not has_access(uid):
+        if c.message:
+            await c.message.answer(block_text(uid), reply_markup=kb_sub(lang))
+        await c.answer()
+        return
     global DEBT_REMIND_SENT
     try:
         did = int(c.data.split(":", 1)[1])
