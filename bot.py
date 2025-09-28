@@ -661,6 +661,7 @@ def _parse_dt(val: Any) -> Optional[datetime]:
 
 
 async def ensure_subscription_state(uid: int) -> None:
+    row = None
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             await _ensure_subscription_columns(db)
@@ -670,8 +671,9 @@ async def ensure_subscription_state(uid: int) -> None:
                 (uid,),
             )
             row = await cur.fetchone()
-    except Exception:
-        row = None
+    except Exception as exc:
+        logger.warning("subscription-state-refresh-failed", extra={"uid": uid, "error": str(exc)})
+        return
     if not row:
         SUB_STARTED.pop(uid, None)
         SUB_EXPIRES.pop(uid, None)
@@ -866,10 +868,10 @@ def t_uz(k,**kw):
             "Jami: {cur} {amount}\\n"
             "To‘langan: {cur} {paid}\\n"
             "Qoldiq: {cur} {remain}\\n"
-            "Tulagan summani yuboring. Qo‘shimcha qarz qo‘shish uchun +belgili qiymat yuboring "
-            "(masalan: 200000 yoki +50000)."
+            "Qo‘shimcha qarz uchun +summani, kamaytirish uchun summani yoki -summani yuboring "
+            "(masalan: +50000 yoki -200000)."
         ),
-        "debt_edit_invalid":"Son kiriting. Masalan: 200000 yoki +50000",
+        "debt_edit_invalid":"Son kiriting. Masalan: 200000, +50000 yoki -200000",
         "debt_edit_saved":"✅ {cur} {applied} qoplandi. Qoldiq: {cur} {remain}",
         "debt_edit_completed":"✅ Qarz to‘liq yopildi.",
         "debt_edit_added":"➕ Qarz {cur} {added} ga oshdi. Yangi qoldiq: {cur} {remain}",
@@ -1064,10 +1066,10 @@ def t_ru(k, **kw):
             "Сумма: {cur} {amount}\\n"
             "Оплачено: {cur} {paid}\\n"
             "Остаток: {cur} {remain}\\n"
-            "Отправьте сумму платежа. Чтобы увеличить долг, отправьте значение с плюсом "
-            "(например: 200000 или +50000)."
+            "Чтобы увеличить долг, отправьте сумму с плюсом, чтобы уменьшить — сумму или значение с минусом "
+            "(например: +50000 или -200000)."
         ),
-        "debt_edit_invalid": "Пожалуйста, введите число. Например: 200000 или +50000",
+        "debt_edit_invalid": "Пожалуйста, введите число. Например: 200000, +50000 или -200000",
         "debt_edit_saved": "✅ Зачтено {cur} {applied}. Остаток: {cur} {remain}",
         "debt_edit_completed": "✅ Долг полностью погашен.",
         "debt_edit_added": "➕ Долг увеличен на {cur} {added}. Новый остаток: {cur} {remain}",
