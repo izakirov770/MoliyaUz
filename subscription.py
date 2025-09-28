@@ -214,24 +214,28 @@ def _normalize_lang(value: str | None) -> str:
     return "uz"
 
 
-async def _get_user_lang(user_id: int) -> str:
+async def _get_user_lang(user_id: int, fallback: str | None = None) -> str:
     cached = _LANG_CACHE.get(user_id)
     if cached:
         return cached
-    lang = LANG_DEFAULT
+    lang_value: str | None = None
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             cur = await db.execute("SELECT lang FROM users WHERE user_id=?", (user_id,))
             row = await cur.fetchone()
         if row:
             if isinstance(row, (list, tuple)):
-                lang = _normalize_lang(row[0])
+                lang_value = _normalize_lang(row[0])
             else:
-                lang = _normalize_lang(row["lang"])
+                lang_value = _normalize_lang(row["lang"])
     except Exception as exc:  # pragma: no cover
         logger.warning("user-lang-fetch-failed", extra={"uid": user_id, "error": str(exc)})
-    _LANG_CACHE[user_id] = lang
-    return lang
+    if not lang_value and fallback:
+        lang_value = _normalize_lang(fallback)
+    if not lang_value:
+        lang_value = LANG_DEFAULT
+    _LANG_CACHE[user_id] = lang_value
+    return lang_value
 
 
 def _t(key: str, lang: str, **kwargs) -> str:
@@ -304,7 +308,7 @@ def _format_display_amount(amount: str) -> str:
 
 async def _send_status(message: types.Message) -> None:
     user_id = message.from_user.id
-    lang = await _get_user_lang(user_id)
+    lang = await _get_user_lang(user_id, getattr(message.from_user, "language_code", None))
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
@@ -344,7 +348,7 @@ async def _send_status(message: types.Message) -> None:
 
 async def _create_invoice_for_plan(message: types.Message, plan_key: str) -> None:
     amount = get_plan_amount(plan_key)
-    lang = await _get_user_lang(message.from_user.id)
+    lang = await _get_user_lang(message.from_user.id, getattr(message.from_user, "language_code", None))
     if not amount or amount in {"0", "0.00"}:
         await message.answer(_t("price_missing", lang))
         return
@@ -383,7 +387,7 @@ async def _finalize_paid(
 
 @subscription_router.message(Command("subscription"))
 async def subscription_menu(message: types.Message):
-    lang = await _get_user_lang(message.from_user.id)
+    lang = await _get_user_lang(message.from_user.id, getattr(message.from_user, "language_code", None))
     await message.answer(_t("menu_intro", lang), reply_markup=subscription_plans_kb())
     await _send_status(message)
 
@@ -391,7 +395,7 @@ async def subscription_menu(message: types.Message):
 @subscription_router.callback_query(F.data == "subpoll:monthly")
 async def on_choose_monthly(callback: types.CallbackQuery):
     await _create_invoice_for_plan(callback.message, PLAN_MONTH_KEY)
-    lang = await _get_user_lang(callback.from_user.id)
+    lang = await _get_user_lang(callback.from_user.id, getattr(callback.from_user, "language_code", None))
     await callback.answer(_t("plan_chosen", lang))
 
 
@@ -400,7 +404,7 @@ async def on_manual_activation_request(callback: types.CallbackQuery):
     parts = callback.data.split(":")
     invoice_id = parts[2] if len(parts) > 2 and parts[2] else None
     if not invoice_id:
-        lang = await _get_user_lang(callback.from_user.id)
+        lang = await _get_user_lang(callback.from_user.id, getattr(callback.from_user, "language_code", None))
         await callback.answer(_t("invoice_missing", lang), show_alert=True)
         return
 
@@ -408,7 +412,7 @@ async def on_manual_activation_request(callback: types.CallbackQuery):
         PENDING_MANUAL_DIGITS[callback.from_user.id] = {}
     PENDING_MANUAL_DIGITS[callback.from_user.id]["invoice_id"] = invoice_id
 
-    lang = await _get_user_lang(callback.from_user.id)
+    lang = await _get_user_lang(callback.from_user.id, getattr(callback.from_user, "language_code", None))
     await callback.message.answer(_t("manual_prompt", lang))
     await callback.answer(_t("instruction_sent", lang))
 
@@ -420,8 +424,13 @@ async def on_manual_last_four(message: types.Message):
         return
 
     text = (message.text or "").strip()
-    lang = await _get_user_lang(message.from_user.id)
-    if text.lower() in {"/cancel", "bekor", "cancel"}:
+    lang = await _get_user_lang(message.from_user.id, getattr(message.from_user, "language_code", None))
+    lowered = text.casefold()
+    if lowered in {"ortga", "назад", "nazad", "back"}:
+        PENDING_MANUAL_DIGITS.pop(message.from_user.id, None)
+        await subscription_menu(message)
+        return
+    if lowered in {"/cancel", "bekor", "cancel"}:
         PENDING_MANUAL_DIGITS.pop(message.from_user.id, None)
         await message.answer(_t("manual_cancelled", lang))
         return
@@ -489,7 +498,7 @@ async def on_manual_last_four(message: types.Message):
 
 @subscription_router.callback_query(F.data.startswith("subpoll:approve"))
 async def on_manual_approve(callback: types.CallbackQuery):
-    admin_lang = await _get_user_lang(callback.from_user.id)
+    admin_lang = await _get_user_lang(callback.from_user.id, getattr(callback.from_user, "language_code", None))
     if not await _is_authorized_admin(callback):
         await callback.answer(_t("access_denied", admin_lang), show_alert=True)
         return
@@ -606,7 +615,7 @@ async def on_manual_approve(callback: types.CallbackQuery):
 
 @subscription_router.callback_query(F.data.startswith("subpoll:reject"))
 async def on_manual_reject(callback: types.CallbackQuery):
-    admin_lang = await _get_user_lang(callback.from_user.id)
+    admin_lang = await _get_user_lang(callback.from_user.id, getattr(callback.from_user, "language_code", None))
     if not await _is_authorized_admin(callback):
         await callback.answer(_t("access_denied", admin_lang), show_alert=True)
         return
@@ -687,7 +696,7 @@ async def on_manual_reject(callback: types.CallbackQuery):
 # [SUBSCRIPTION-POLLING-END]
 @subscription_router.message(Command("bratula"))
 async def manual_activate(message: types.Message):
-    lang = await _get_user_lang(message.from_user.id)
+    lang = await _get_user_lang(message.from_user.id, getattr(message.from_user, "language_code", None))
     if message.from_user.id not in ADMIN_IDS:
         await message.answer(_t("manual_cmd_only_admin", lang))
         return
