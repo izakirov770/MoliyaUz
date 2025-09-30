@@ -215,6 +215,28 @@ USERS_PROFILE_CACHE: Dict[int, Dict[str, Any]] = {}
 BOT_DESCRIPTION_APPLIED = False
 
 
+def _profile_is_activated(profile: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(profile, dict):
+        return False
+    if profile.get("activated_at"):
+        return True
+    if profile.get("contact_verified_at"):
+        return True
+    if profile.get("phone"):
+        return True
+    return False
+
+
+def ensure_user_activation(uid: int, profile: Optional[Dict[str, Any]] = None) -> bool:
+    if USER_ACTIVATED.get(uid):
+        return True
+    profile_data = profile if isinstance(profile, dict) else USERS_PROFILE_CACHE.get(uid)
+    if _profile_is_activated(profile_data):
+        USER_ACTIVATED[uid] = True
+        return True
+    return False
+
+
 class CardAddStates(StatesGroup):
     label = State()
     pan = State()
@@ -317,6 +339,15 @@ def load_users_storage() -> None:
             continue
         cache[uid] = value
     USERS_PROFILE_CACHE = cache
+    for uid, profile in cache.items():
+        if _profile_is_activated(profile):
+            USER_ACTIVATED[uid] = True
+        else:
+            USER_ACTIVATED.setdefault(uid, False)
+        lang_val = profile.get("lang") if isinstance(profile, dict) else None
+        if isinstance(lang_val, str) and lang_val:
+            USER_LANG[uid] = lang_val
+        SEEN_USERS.add(uid)
 
 
 def save_users_storage() -> None:
@@ -918,7 +949,9 @@ def t_uz(k,**kw):
         "morning_ping":"🌅 Hayrli tong! Harajatlaringizni yozishni unutmang — MoliyaUz doim yoningizda.",
         "evening_ping":"🌙 Kun qanday o‘tdi? Harajatlaringizni yozishni unutmang. Atigi 15 soniya kifoya!",
         "daily":"🕗 Bugungi xarajatlaringizni yozdingizmi? 📝",
-        "lang_again":"Tilni tanlang:","enter_text":"Matn yuboring.",
+        "lang_again":"Tilni tanlang:",
+        "lang_switched":"🌐 Til o‘zgartirildi. Davom etamiz.",
+        "enter_text":"Matn yuboring.",
 
         "balance":(
             "💼 <b>Balans</b>\n\n"
@@ -1117,6 +1150,7 @@ def t_ru(k, **kw):
         "evening_ping": "🌙 Как прошёл день? Не забудьте внести траты. Всего 15 секунд!",
         "daily": "🕗 Вы сегодня записали расходы? 📝",
         "lang_again": "Выберите язык:",
+        "lang_switched": "🌐 Язык обновлен. Продолжаем.",
         "enter_text": "Отправьте текст.",
 
         "balance": (
@@ -1691,7 +1725,7 @@ class StartGateMiddleware(BaseMiddleware):
                 return await handler(event, data)
             user_id=event.from_user.id
             USER_ACTIVATED.setdefault(user_id, False)
-            if USER_ACTIVATED.get(user_id):
+            if ensure_user_activation(user_id):
                 return await handler(event, data)
             text=event.text or ""
             if text.startswith("/start"):
@@ -1705,7 +1739,7 @@ class StartGateMiddleware(BaseMiddleware):
                 return await handler(event, data)
             user_id=event.from_user.id
             USER_ACTIVATED.setdefault(user_id, False)
-            if USER_ACTIVATED.get(user_id):
+            if ensure_user_activation(user_id):
                 return await handler(event, data)
             lang=get_lang(user_id)
             T=L(lang)
@@ -1831,6 +1865,8 @@ async def start(m:Message):
         USER_LANG[uid] = lang
         STEP[uid] = "main"
         await ensure_subscription_state(uid)
+        if not profile.get("activated_at"):
+            update_user_profile(uid, activated_at=datetime.now(timezone.utc).isoformat())
         display_name = profile.get("name") if isinstance(profile, dict) else None
         if not display_name:
             display_name = (m.from_user.full_name or m.from_user.first_name or m.from_user.username or "") if m.from_user else ""
@@ -2120,20 +2156,34 @@ async def on_text(m:Message):
 
         if step=="lang":
             low=t.lower()
-            if "uz" in low or "o‘z" in low or "o'z" in low: USER_LANG[uid]="uz"
-            elif "рус" in low or "ru" in low: USER_LANG[uid]="ru"
-            else: return
-            lang = get_lang(uid)
+            chosen_lang = None
+            if "uz" in low or "o‘z" in low or "o'z" in low:
+                chosen_lang = "uz"
+            elif "рус" in low or "ru" in low:
+                chosen_lang = "ru"
+            if not chosen_lang:
+                return
+            USER_LANG[uid] = chosen_lang
             existing_raw = USERS_PROFILE_CACHE.get(uid)
             existing = existing_raw if isinstance(existing_raw, dict) else {}
+            if _profile_is_activated(existing):
+                update_user_profile(uid, lang=chosen_lang)
+                nav_reset(uid)
+                STEP[uid] = "main"
+                translator = L(chosen_lang)
+                await m.answer(translator("lang_switched"))
+                await m.answer(translator("menu"), reply_markup=get_main_menu(chosen_lang))
+                return
+
             raw_name = existing.get("name")
             if not raw_name:
                 raw_name = (m.from_user.full_name or m.from_user.first_name or m.from_user.username or "") if m.from_user else ""
-            fallback_name = raw_name or ("do‘stim" if lang == "uz" else "друг")
-            update_user_profile(uid, lang=lang, name=raw_name or None)
+            fallback_name = raw_name or ("do‘stim" if chosen_lang == "uz" else "друг")
+            update_user_profile(uid, lang=chosen_lang, name=raw_name or None)
             STEP[uid]="need_phone"
-            await m.answer(L(lang)("welcome", name=fallback_name), reply_markup=kb_share(lang))
-            await m.answer("—", reply_markup=kb_oferta(lang)); return
+            await m.answer(L(chosen_lang)("welcome", name=fallback_name), reply_markup=kb_share(chosen_lang))
+            await m.answer("—", reply_markup=kb_oferta(chosen_lang))
+            return
 
         if step=="name":
             lang=get_lang(uid); T=L(lang)
@@ -2548,14 +2598,17 @@ async def on_contact(m:Message):
     username = m.from_user.username if m.from_user else None
     first_name = m.from_user.first_name if m.from_user else None
     last_name = m.from_user.last_name if m.from_user else None
+    now_iso = datetime.now(timezone.utc).isoformat()
     update_user_profile(
         uid,
         phone=phone,
         username=username,
         first_name=first_name,
         last_name=last_name,
-        contact_verified_at=datetime.now(timezone.utc).isoformat(),
+        contact_verified_at=now_iso,
+        activated_at=now_iso,
     )
+    USER_ACTIVATED[uid] = True
     nav_reset(uid)
     await m.answer((t_uz if get_lang(uid)=="uz" else t_ru)("menu"), reply_markup=get_main_menu(get_lang(uid)))
     STEP[uid]="main"
